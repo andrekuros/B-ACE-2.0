@@ -1,0 +1,13 @@
+{
+  "name": "B-ACE 2.0",
+  "install": "cargo build -p bace-server",
+  "terminals": [
+    {
+      "name": "dashboard",
+      "command": "cargo run -p bace-server -- --port 8787 --static-dir web/dist --runs-dir runs"
+    }
+  ],
+  "ports": [
+    { "name": "dashboard", "port": 8787 }
+  ]
+}
