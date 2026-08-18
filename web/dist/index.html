@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/styles.css?v=3" />
   <script type="importmap">
   {
     "imports": {
@@ -40,19 +40,34 @@
           <label>Max cycles <input id="max-cycles" type="number" min="10" value="200" /></label>
           <button id="start-job" class="cta">Start simulation</button>
           <ul id="job-list"></ul>
+
+          <h2>View</h2>
+          <div class="seg" id="layout-seg">
+            <button type="button" data-layout="split" class="active">Split</button>
+            <button type="button" data-layout="focus">Focus</button>
+          </div>
+          <label>Env
+            <select id="env-picker"></select>
+          </label>
+          <div class="cam-modes" data-scene="live">
+            <button type="button" data-cam="orbit" class="active">Orbit</button>
+            <button type="button" data-cam="chase">Chase</button>
+            <button type="button" data-cam="tactical">Tactical</button>
+          </div>
+          <label class="check"><input id="cfg-radar" type="checkbox" checked /> Radar</label>
+          <label class="check"><input id="cfg-tracks" type="checkbox" checked /> Tracks</label>
+          <label class="check"><input id="cfg-wez" type="checkbox" checked /> WEZ</label>
+          <label class="check"><input id="cfg-labels" type="checkbox" checked /> Labels</label>
+          <label class="check"><input id="cfg-stems" type="checkbox" checked /> Altitude stems</label>
+          <label>Aircraft <input id="cfg-ac-scale" type="range" min="1" max="8" step="0.5" value="3" /></label>
+          <label>Missiles <input id="cfg-msl-scale" type="range" min="1" max="10" step="0.5" value="4" /></label>
+          <label>Altitude <input id="cfg-alt-scale" type="range" min="1" max="10" step="0.5" value="4" /></label>
         </aside>
         <div class="stage">
           <div class="viewport" id="live-viewport">
             <canvas id="live-canvas"></canvas>
             <div class="view-toolbar">
-              <label>Env
-                <select id="env-picker"></select>
-              </label>
-              <div class="cam-modes" data-scene="live">
-                <button type="button" data-cam="orbit" class="active">Orbit</button>
-                <button type="button" data-cam="chase">Chase</button>
-                <button type="button" data-cam="tactical">Tactical</button>
-              </div>
+              <button type="button" id="back-split" class="ghost hidden">Back to split</button>
             </div>
           </div>
           <div id="live-meta" class="meta"></div>
@@ -90,16 +105,54 @@
       <section id="view-experiment" class="view hidden">
         <aside class="panel">
           <h2>Batch experiment</h2>
+          <p class="hint">Sweeps blue <code>d_shot</code> from 0.70 by +0.01 per case.</p>
           <label>Cases <input id="exp-cases" type="number" min="1" max="128" value="16" /></label>
           <label>Max cycles <input id="exp-cycles" type="number" min="20" value="150" /></label>
+          <label>Blue
+            <select id="exp-blue">
+              <option value="baseline1" selected>baseline1</option>
+              <option value="duck">duck</option>
+            </select>
+          </label>
+          <label>Red
+            <select id="exp-red">
+              <option value="duck" selected>duck</option>
+              <option value="baseline1">baseline1</option>
+            </select>
+          </label>
           <button id="run-exp" class="cta">Run experiment</button>
         </aside>
-        <div class="stage">
-          <pre id="exp-out" class="inspect"></pre>
+        <div class="stage exp-stage">
+          <div id="exp-summary" class="cards"></div>
+          <div class="exp-grid">
+            <div>
+              <h3>Outcomes</h3>
+              <div id="exp-bars" class="bars"></div>
+            </div>
+            <div>
+              <h3>d_shot vs steps</h3>
+              <svg id="exp-scatter" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid meet"></svg>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="exp-table">
+              <thead>
+                <tr>
+                  <th data-sort="seed">seed</th>
+                  <th data-sort="d_shot">d_shot</th>
+                  <th data-sort="end">end</th>
+                  <th data-sort="steps">steps</th>
+                  <th data-sort="blue_alive">blue</th>
+                  <th data-sort="red_alive">red</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </section>
     </main>
   </div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=3"></script>
 </body>
 </html>

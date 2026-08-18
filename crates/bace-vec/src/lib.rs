@@ -132,11 +132,20 @@ impl ParallelEnvs {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ExperimentOutcome {
+    pub config: ScenarioConfig,
+    pub end: EndCondition,
+    pub steps: u32,
+    pub blue_alive: usize,
+    pub red_alive: usize,
+}
+
 /// Run a grid of scenario configs (experiment mode).
 pub fn run_experiment(
     cases: Vec<ScenarioConfig>,
     max_parallel: usize,
-) -> Vec<(ScenarioConfig, EndCondition, u32)> {
+) -> Vec<ExperimentOutcome> {
     let chunk = max_parallel.max(1);
     cases
         .into_iter()
@@ -152,7 +161,13 @@ pub fn run_experiment(
                     while sim.end == EndCondition::Ongoing {
                         sim.step(&empty);
                     }
-                    (cfg.clone(), sim.end, sim.action_step)
+                    ExperimentOutcome {
+                        config: cfg.clone(),
+                        end: sim.end,
+                        steps: sim.action_step,
+                        blue_alive: sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count(),
+                        red_alive: sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count(),
+                    }
                 })
                 .collect::<Vec<_>>()
         })
@@ -182,5 +197,18 @@ mod tests {
             let results = pe.step_all(&actions);
             assert_eq!(results.len(), 4);
         }
+    }
+
+    #[test]
+    fn experiment_returns_alive_counts() {
+        let mut scenario = ScenarioConfig::default();
+        scenario.env.max_cycles = 8;
+        scenario.blue.behavior = Behavior::Duck;
+        scenario.red.behavior = Behavior::Duck;
+        let out = run_experiment(vec![scenario], 1);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].steps >= 1);
+        assert_eq!(out[0].blue_alive, 1);
+        assert_eq!(out[0].red_alive, 1);
     }
 }

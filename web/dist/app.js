@@ -1,7 +1,9 @@
 import { CombatScene } from "./scene.js";
+import { DEFAULT_VIEW_CONFIG } from "./models.js";
 import { formatMeta } from "./hud.js";
 
 const API = "/api";
+const CFG_KEY = "bace-view-config";
 
 const state = {
   view: "live",
@@ -12,20 +14,43 @@ const state = {
   playing: false,
   envIndex: 0,
   snapshots: [],
+  exp: null,
+  expSort: { key: "seed", dir: 1 },
 };
 
 function $(id) {
   return document.getElementById(id);
 }
 
+function loadCfg() {
+  try {
+    return { ...DEFAULT_VIEW_CONFIG, ...JSON.parse(localStorage.getItem(CFG_KEY) || "{}") };
+  } catch {
+    return { ...DEFAULT_VIEW_CONFIG };
+  }
+}
+
+function saveCfg(cfg) {
+  localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
+}
+
 const liveScene = new CombatScene($("live-canvas"), {
   hudRoot: $("live-viewport"),
   legendHost: $("live-viewport"),
+  split: true,
 });
 const replayScene = new CombatScene($("replay-canvas"), {
   hudRoot: $("replay-viewport"),
   legendHost: $("replay-viewport"),
+  split: false,
 });
+replayScene.setConfig({ layout: "focus" });
+
+liveScene.onFocus = (index) => {
+  state.envIndex = index;
+  $("env-picker").value = String(index);
+  setLayout("focus");
+};
 
 async function api(path, opts) {
   const res = await fetch(API + path, {
@@ -54,18 +79,81 @@ document.querySelectorAll("nav button").forEach((b) => {
   b.addEventListener("click", () => switchView(b.dataset.view));
 });
 
+function applyViewConfig(cfg) {
+  liveScene.setConfig(cfg);
+  $("layout-seg").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.layout === cfg.layout);
+  });
+  document.querySelectorAll('.cam-modes[data-scene="live"] button').forEach((b) => {
+    b.classList.toggle("active", b.dataset.cam === cfg.camera);
+  });
+  $("cfg-radar").checked = cfg.radar;
+  $("cfg-tracks").checked = cfg.tracks;
+  $("cfg-wez").checked = cfg.wez;
+  $("cfg-labels").checked = cfg.labels;
+  $("cfg-stems").checked = cfg.stems;
+  $("cfg-ac-scale").value = cfg.aircraftScale;
+  $("cfg-msl-scale").value = cfg.missileScale;
+  $("cfg-alt-scale").value = cfg.altScale;
+  $("back-split").classList.toggle("hidden", cfg.layout !== "focus");
+  saveCfg(cfg);
+  showLiveSnapshot();
+}
+
+function currentCfg() {
+  return { ...liveScene.config };
+}
+
+function setLayout(layout) {
+  const cfg = currentCfg();
+  cfg.layout = layout;
+  if (layout === "split" && cfg.camera === "chase") cfg.camera = "orbit";
+  applyViewConfig(cfg);
+}
+
+$("layout-seg").querySelectorAll("button").forEach((btn) => {
+  btn.addEventListener("click", () => setLayout(btn.dataset.layout));
+});
+$("back-split").addEventListener("click", () => setLayout("split"));
+
 document.querySelectorAll(".cam-modes").forEach((group) => {
   group.querySelectorAll("button").forEach((btn) => {
     btn.addEventListener("click", () => {
-      group.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
       const scene = group.dataset.scene === "replay" ? replayScene : liveScene;
+      if (scene === liveScene && liveScene.config.layout === "split" && btn.dataset.cam === "chase") {
+        setLayout("focus");
+      }
       scene.setCameraMode(btn.dataset.cam);
+      group.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b === btn));
+      if (scene === liveScene) saveCfg(liveScene.config);
     });
   });
 });
 
+["radar", "tracks", "wez", "labels", "stems"].forEach((key) => {
+  $(`cfg-${key}`).addEventListener("change", (e) => {
+    liveScene.setConfig({ [key]: e.target.checked });
+    saveCfg(liveScene.config);
+  });
+});
+
+$("cfg-ac-scale").addEventListener("input", (e) => {
+  liveScene.setConfig({ aircraftScale: Number(e.target.value) });
+  saveCfg(liveScene.config);
+});
+$("cfg-msl-scale").addEventListener("input", (e) => {
+  liveScene.setConfig({ missileScale: Number(e.target.value) });
+  saveCfg(liveScene.config);
+});
+$("cfg-alt-scale").addEventListener("input", (e) => {
+  liveScene.setConfig({ altScale: Number(e.target.value) });
+  saveCfg(liveScene.config);
+});
+
 $("env-picker").addEventListener("change", () => {
   state.envIndex = Number($("env-picker").value) || 0;
+  liveScene.setFocusIndex(state.envIndex);
+  if (liveScene.config.layout === "split") setLayout("focus");
   showLiveSnapshot();
 });
 
@@ -92,9 +180,15 @@ function showLiveSnapshot() {
   const snaps = state.snapshots;
   if (!snaps.length) return;
   const i = Math.min(state.envIndex, snaps.length - 1);
+  liveScene.setFocusIndex(i);
+  liveScene.applyAll(snaps, i);
   const snap = snaps[i];
-  liveScene.apply(snap);
-  $("live-meta").textContent = formatMeta(snap, `env ${i + 1}/${snaps.length}`);
+  $("live-meta").textContent = formatMeta(
+    snap,
+    liveScene.config.layout === "split"
+      ? `split ${Math.min(4, snaps.length)}/${snaps.length}`
+      : `focus env ${i + 1}/${snaps.length}`
+  );
 }
 
 async function refreshHealth() {
@@ -205,18 +299,110 @@ setInterval(() => {
   renderReplay();
 }, 200);
 
+const END_COLOR = {
+  RedKilled: "#3ecf8e",
+  BlueKilled: "#ff6b5a",
+  MutualKill: "#c4b5fd",
+  MaxCycles: "#ffd166",
+  RedMission: "#4aa3ff",
+};
+
+function renderExperiment(out) {
+  state.exp = out;
+  const n = out.cases || 0;
+  const cards = [
+    ["cases", n],
+    ["win rate", `${((out.win_rate || 0) * 100).toFixed(0)}%`],
+    ["red killed", out.red_killed ?? 0],
+    ["blue killed", out.blue_killed ?? 0],
+    ["mutual", out.mutual_kill ?? 0],
+    ["timeout", out.timeouts ?? 0],
+    ["mean steps", (out.mean_steps || 0).toFixed(0)],
+  ];
+  $("exp-summary").innerHTML = cards
+    .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+    .join("");
+
+  const counts = {
+    red_killed: out.red_killed || 0,
+    blue_killed: out.blue_killed || 0,
+    mutual_kill: out.mutual_kill || 0,
+      max_cycles: out.timeouts || 0,
+  };
+  $("exp-bars").innerHTML = Object.entries(counts)
+    .map(([k, v]) => {
+      const pct = n ? (100 * v) / n : 0;
+      return `<div class="bar-row"><span>${k}</span><div class="bar-track"><div class="bar-fill ${k}" style="width:${pct}%"></div></div><span>${v}</span></div>`;
+    })
+    .join("");
+
+  const rows = out.results || [];
+  const xs = rows.map((r) => Number(r.d_shot) || 0);
+  const ys = rows.map((r) => Number(r.steps) || 0);
+  const minX = Math.min(...xs, 0.7);
+  const maxX = Math.max(...xs, 0.85);
+  const minY = 0;
+  const maxY = Math.max(...ys, 1);
+  const svg = $("exp-scatter");
+  const dots = rows
+    .map((r) => {
+      const x = 24 + ((Number(r.d_shot) - minX) / (maxX - minX || 1)) * 280;
+      const y = 160 - ((Number(r.steps) - minY) / (maxY - minY || 1)) * 140;
+      const c = END_COLOR[r.end] || "#8aa0b5";
+      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${c}" opacity="0.9"><title>seed ${r.seed} d_shot=${r.d_shot} ${r.end}</title></circle>`;
+    })
+    .join("");
+  svg.innerHTML = `
+    <rect x="0" y="0" width="320" height="180" fill="transparent"/>
+    <text x="12" y="16" fill="#8aa0b5" font-size="10" font-family="IBM Plex Mono">steps</text>
+    <text x="250" y="174" fill="#8aa0b5" font-size="10" font-family="IBM Plex Mono">d_shot</text>
+    ${dots}
+  `;
+  renderExpTable();
+}
+
+function renderExpTable() {
+  const rows = [...(state.exp?.results || [])];
+  const { key, dir } = state.expSort;
+  rows.sort((a, b) => {
+    const va = a[key];
+    const vb = b[key];
+    if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+    return String(va).localeCompare(String(vb)) * dir;
+  });
+  const tb = $("exp-table").querySelector("tbody");
+  tb.innerHTML = rows
+    .map(
+      (r) =>
+        `<tr><td>${r.seed}</td><td>${Number(r.d_shot).toFixed(2)}</td><td>${r.end}</td><td>${r.steps}</td><td>${r.blue_alive}</td><td>${r.red_alive}</td></tr>`
+    )
+    .join("");
+}
+
+$("exp-table").querySelectorAll("th").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (state.expSort.key === key) state.expSort.dir *= -1;
+    else state.expSort = { key, dir: 1 };
+    renderExpTable();
+  });
+});
+
 $("run-exp").onclick = async () => {
-  $("exp-out").textContent = "running…";
+  $("exp-summary").innerHTML = `<div class="card"><div class="k">status</div><div class="v">running…</div></div>`;
   const out = await api("/experiment", {
     method: "POST",
     body: JSON.stringify({
       cases: Number($("exp-cases").value),
       max_cycles: Number($("exp-cycles").value),
+      blue_behavior: $("exp-blue").value,
+      red_behavior: $("exp-red").value,
     }),
   });
-  $("exp-out").textContent = JSON.stringify(out, null, 2);
+  renderExperiment(out);
 };
 
+applyViewConfig(loadCfg());
 refreshHealth();
 refreshJobs();
 refreshRuns();

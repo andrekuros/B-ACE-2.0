@@ -233,18 +233,29 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, id: String) {
 pub struct ExperimentRequest {
     pub cases: usize,
     pub max_cycles: Option<u32>,
+    pub blue_behavior: Option<String>,
+    pub red_behavior: Option<String>,
 }
 
 async fn run_experiment_api(Json(req): Json<ExperimentRequest>) -> Json<serde_json::Value> {
     let n = req.cases.clamp(1, 256);
+    let blue = req
+        .blue_behavior
+        .as_deref()
+        .map(parse_behavior)
+        .unwrap_or(Behavior::Baseline1);
+    let red = req
+        .red_behavior
+        .as_deref()
+        .map(parse_behavior)
+        .unwrap_or(Behavior::Duck);
     let mut cases = Vec::with_capacity(n);
     for i in 0..n {
         let mut cfg = ScenarioConfig::default();
         cfg.env.seed = i as u64 + 1;
         cfg.env.max_cycles = req.max_cycles.unwrap_or(200);
-        cfg.blue.behavior = Behavior::Baseline1;
-        cfg.red.behavior = Behavior::Duck;
-        // vary d_shot slightly
+        cfg.blue.behavior = blue;
+        cfg.red.behavior = red;
         let d = 0.7 + (i as f64) * 0.01;
         cfg.blue.beh_config.d_shot = vec![d];
         cases.push(cfg);
@@ -252,16 +263,42 @@ async fn run_experiment_api(Json(req): Json<ExperimentRequest>) -> Json<serde_js
     let results = bace_vec::run_experiment(cases, 8);
     let wins = results
         .iter()
-        .filter(|(_, e, _)| *e == EndCondition::RedKilled)
+        .filter(|r| r.end == EndCondition::RedKilled)
         .count();
+    let losses = results
+        .iter()
+        .filter(|r| r.end == EndCondition::BlueKilled)
+        .count();
+    let mutual = results
+        .iter()
+        .filter(|r| r.end == EndCondition::MutualKill)
+        .count();
+    let timeout = results
+        .iter()
+        .filter(|r| r.end == EndCondition::MaxCycles)
+        .count();
+    let mean_steps = if results.is_empty() {
+        0.0
+    } else {
+        results.iter().map(|r| r.steps as f64).sum::<f64>() / results.len() as f64
+    };
     Json(serde_json::json!({
         "cases": results.len(),
         "red_killed": wins,
-        "results": results.iter().map(|(c,e,s)| serde_json::json!({
-            "seed": c.env.seed,
-            "d_shot": c.blue.beh_config.d_shot,
-            "end": format!("{:?}", e),
-            "steps": s,
+        "blue_killed": losses,
+        "mutual_kill": mutual,
+        "timeouts": timeout,
+        "win_rate": if results.is_empty() { 0.0 } else { wins as f64 / results.len() as f64 },
+        "mean_steps": mean_steps,
+        "blue_behavior": format!("{:?}", blue),
+        "red_behavior": format!("{:?}", red),
+        "results": results.iter().map(|r| serde_json::json!({
+            "seed": r.config.env.seed,
+            "d_shot": r.config.blue.beh_config.d_shot.first().copied().unwrap_or(0.0),
+            "end": format!("{:?}", r.end),
+            "steps": r.steps,
+            "blue_alive": r.blue_alive,
+            "red_alive": r.red_alive,
         })).collect::<Vec<_>>(),
     }))
 }
