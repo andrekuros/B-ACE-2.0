@@ -307,7 +307,9 @@ impl Fighter {
                 let side = if t.aspect >= 0.0 { 1.0 } else { -1.0 };
                 self.hdg_cmd = clamp_hdg(self.hdg + 90.0 * side);
                 self.g_cmd = self.max_g * 0.8;
-                self.fire_cmd = false;
+                // Shoot-then-break: still pickle if the target is in WEZ and on the nose.
+                let range_ratio = t.dist / t.own_wez.r_max.max(1e-6);
+                self.fire_cmd = range_ratio <= d_shot && t.aspect.abs() < 30.0 && self.missiles > 0;
                 return;
             }
         }
