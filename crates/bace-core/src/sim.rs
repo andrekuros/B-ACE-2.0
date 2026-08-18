@@ -49,15 +49,34 @@ pub struct StepResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackSnapshot {
+    pub id: u32,
+    pub detected: bool,
+    pub dist: f64,
+    pub aspect: f64,
+    pub own_r_max: f64,
+    pub is_missile_support: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FighterSnapshot {
     pub id: u32,
     pub team: u8,
     pub pos: [f64; 3],
     pub hdg: f64,
+    pub pitch: f64,
+    pub speed: f64,
     pub alive: bool,
     pub missiles: u32,
     pub fsm: FsmState,
     pub agent_name: Option<String>,
+    pub hpt_id: Option<u32>,
+    pub supporting_missile: bool,
+    pub radar_range: f64,
+    pub radar_hfov: f64,
+    pub radar_vfov_up: f64,
+    pub radar_vfov_down: f64,
+    pub tracks: Vec<TrackSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +86,8 @@ pub struct MissileSnapshot {
     pub hdg: f64,
     pub team: u8,
     pub pitbull: bool,
+    pub target_id: u32,
+    pub has_support: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,10 +643,30 @@ impl Simulation {
                             team: f.team,
                             pos: f.pos,
                             hdg: f.hdg,
+                            pitch: f.pitch,
+                            speed: f.speed,
                             alive: f.alive,
                             missiles: f.missiles,
                             fsm: f.fsm,
                             agent_name,
+                            hpt_id: f.hpt_id,
+                            supporting_missile: f.supporting_missile,
+                            radar_range: f.radar_range,
+                            radar_hfov: f.radar_hfov,
+                            radar_vfov_up: f.radar_vfov_up,
+                            radar_vfov_down: f.radar_vfov_down,
+                            tracks: f
+                                .enemy_tracks
+                                .iter()
+                                .map(|t| TrackSnapshot {
+                                    id: t.id,
+                                    detected: t.detected,
+                                    dist: t.dist,
+                                    aspect: t.aspect,
+                                    own_r_max: t.own_wez.r_max,
+                                    is_missile_support: t.is_missile_support,
+                                })
+                                .collect(),
                         }
                     })
                     .collect()
@@ -639,6 +680,8 @@ impl Simulation {
                     hdg: m.hdg,
                     team: m.team,
                     pitbull: m.pitbull,
+                    target_id: m.target_id,
+                    has_support: m.has_support,
                 })
                 .collect(),
         }
@@ -852,6 +895,33 @@ mod tests {
             .map(|f| f.pos[0])
             .collect();
         assert!(xs[1] > xs[0], "blue line-abreast should be spaced in x");
+    }
+
+    #[test]
+    fn snapshot_includes_radar_and_tracks() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 80;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let snap0 = sim.snapshot();
+        let blue0 = snap0.fighters.iter().find(|f| f.team == 0).unwrap();
+        assert!(blue0.radar_range > 0.0);
+        assert!(blue0.radar_hfov > 0.0);
+        assert_eq!(blue0.tracks.len(), 1);
+        assert!(blue0.speed > 0.0);
+        let empty = HashMap::new();
+        for _ in 0..50 {
+            sim.step(&empty);
+        }
+        let snap = sim.snapshot();
+        let blue = snap.fighters.iter().find(|f| f.team == 0).unwrap();
+        assert!(
+            blue.tracks.iter().any(|t| t.detected),
+            "closing ducks should enter radar"
+        );
+        assert!(blue.tracks.iter().any(|t| t.detected && t.own_r_max > 0.0));
     }
 
     #[test]

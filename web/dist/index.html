@@ -8,6 +8,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
   <div class="app">
@@ -34,7 +42,19 @@
           <ul id="job-list"></ul>
         </aside>
         <div class="stage">
-          <canvas id="live-canvas" width="900" height="560"></canvas>
+          <div class="viewport" id="live-viewport">
+            <canvas id="live-canvas"></canvas>
+            <div class="view-toolbar">
+              <label>Env
+                <select id="env-picker"></select>
+              </label>
+              <div class="cam-modes" data-scene="live">
+                <button type="button" data-cam="orbit" class="active">Orbit</button>
+                <button type="button" data-cam="chase">Chase</button>
+                <button type="button" data-cam="tactical">Tactical</button>
+              </div>
+            </div>
+          </div>
           <div id="live-meta" class="meta"></div>
         </div>
       </section>
@@ -53,7 +73,16 @@
           </div>
         </aside>
         <div class="stage">
-          <canvas id="replay-canvas" width="900" height="560"></canvas>
+          <div class="viewport" id="replay-viewport">
+            <canvas id="replay-canvas"></canvas>
+            <div class="view-toolbar">
+              <div class="cam-modes" data-scene="replay">
+                <button type="button" data-cam="orbit" class="active">Orbit</button>
+                <button type="button" data-cam="chase">Chase</button>
+                <button type="button" data-cam="tactical">Tactical</button>
+              </div>
+            </div>
+          </div>
           <pre id="replay-inspect" class="inspect"></pre>
         </div>
       </section>
@@ -71,6 +100,6 @@
       </section>
     </main>
   </div>
-  <script src="/app.js"></script>
+  <script type="module" src="/app.js"></script>
 </body>
 </html>
