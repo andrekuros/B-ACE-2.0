@@ -87,3 +87,40 @@ def test_episode_terminates():
             break
     assert done
     env.close()
+
+
+def test_snapshot_has_fighters():
+    env = BaceEnv(
+        {
+            "env": {"max_cycles": 8, "seed": 1, "action_repeat": 5},
+            "blue": {"num_agents": 1, "behavior": "duck"},
+            "red": {"num_agents": 1, "behavior": "duck"},
+        }
+    )
+    env.reset(seed=1)
+    state = env.state()
+    assert len(state["fighters"]) == 2
+    assert state["end"] in {"ongoing", "max_cycles"}
+    env.close()
+
+
+def test_baseline_episode_runs():
+    env = BaceEnv(
+        {
+            "env": {"max_cycles": 40, "seed": 4, "action_repeat": 10},
+            "blue": {"num_agents": 1, "behavior": "baseline1"},
+            "red": {"num_agents": 1, "behavior": "duck"},
+        }
+    )
+    env.reset(seed=4)
+    last_end = None
+    for _ in range(50):
+        if not env.agents:
+            break
+        actions = {a: np.zeros(4, dtype=np.float32) for a in env.agents}
+        _, _, terms, truncs, _ = env.step(actions)
+        last_end = env.state()["end"]
+        if all(terms.values()) or all(truncs.values()):
+            break
+    assert last_end is not None
+    env.close()

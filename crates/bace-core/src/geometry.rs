@@ -66,4 +66,12 @@ mod tests {
         let b = [3.0, 99.0, 4.0];
         assert!((distance2d(a, b) - 5.0).abs() < 1e-9);
     }
+
+    #[test]
+    fn heading_zero_faces_negative_z() {
+        let from = [0.0, 0.0, 0.0];
+        assert!((heading_to(from, [0.0, 0.0, -10.0])).abs() < 1e-9);
+        assert!((heading_to(from, [10.0, 0.0, 0.0]) - 90.0).abs() < 1e-9);
+        assert!((heading_to(from, [0.0, 0.0, 10.0]).abs() - 180.0).abs() < 1e-9);
+    }
 }

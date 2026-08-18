@@ -685,4 +685,127 @@ mod tests {
             assert!((fa.pos[2] - fb.pos[2]).abs() < 1e-9);
         }
     }
+
+    #[test]
+    fn duck_vs_duck_closes_and_hits_max_cycles() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 25;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let start = sim.snapshot();
+        let d0 = crate::geometry::distance2d(start.fighters[0].pos, start.fighters[1].pos);
+        let empty = HashMap::new();
+        let mut last = sim.step(&empty);
+        while last.end == EndCondition::Ongoing {
+            last = sim.step(&empty);
+        }
+        let end = sim.snapshot();
+        let d1 = crate::geometry::distance2d(end.fighters[0].pos, end.fighters[1].pos);
+        assert!(d1 < d0, "head-on ducks should close range ({d1} vs {d0})");
+        assert_eq!(last.end, EndCondition::MaxCycles);
+        assert!(last.agents["agent_0"].truncated);
+        assert!(!last.agents["agent_0"].terminated);
+    }
+
+    #[test]
+    fn external_heading_command_turns_blue() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 10;
+        cfg.env.action_repeat = 20;
+        cfg.blue.behavior = Behavior::External;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let h0 = sim.snapshot().fighters[0].hdg;
+        let mut actions = HashMap::new();
+        actions.insert(
+            "agent_0".into(),
+            crate::obs::Action {
+                d_heading: 1.0,
+                d_altitude: 0.0,
+                g_force: 1.0,
+                fire: -1.0,
+            },
+        );
+        sim.step(&actions);
+        let h1 = sim.snapshot().fighters[0].hdg;
+        assert!(
+            (h1 - h0).abs() > 1.0,
+            "full right turn should change heading ({h0} -> {h1})"
+        );
+    }
+
+    #[test]
+    fn baseline_vs_duck_fires_or_kills() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 400;
+        cfg.blue.behavior = Behavior::Baseline1;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        let mut saw_missile = false;
+        let mut last = sim.step(&empty);
+        while last.end == EndCondition::Ongoing {
+            if !sim.missiles.is_empty() || sim.fighters.iter().any(|f| f.missiles < 6) {
+                saw_missile = true;
+            }
+            last = sim.step(&empty);
+        }
+        let kill = matches!(last.end, EndCondition::RedKilled | EndCondition::BlueKilled);
+        assert!(
+            saw_missile || kill,
+            "baseline vs duck should fire or produce a kill, ended {:?}",
+            last.end
+        );
+    }
+
+    #[test]
+    fn close_range_missile_can_kill() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 80;
+        cfg.env.action_repeat = 5;
+        cfg.blue.behavior = Behavior::Baseline1;
+        cfg.red.behavior = Behavior::Duck;
+        cfg.blue.init_position.z = 8.0;
+        cfg.red.init_position.z = -8.0;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(2));
+        let empty = HashMap::new();
+        let mut last = sim.step(&empty);
+        while last.end == EndCondition::Ongoing {
+            last = sim.step(&empty);
+        }
+        assert!(
+            matches!(
+                last.end,
+                EndCondition::RedKilled | EndCondition::BlueKilled | EndCondition::MaxCycles
+            ),
+            "unexpected end {:?}",
+            last.end
+        );
+        let fired = sim.fighters.iter().any(|f| f.missiles < 6);
+        let dead = sim.fighters.iter().any(|f| !f.alive);
+        assert!(fired || dead, "close-range 1v1 should shoot or kill");
+    }
+
+    #[test]
+    fn two_v_two_obs_size_and_agents() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 8;
+        cfg.blue.num_agents = 2;
+        cfg.red.num_agents = 2;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        let r = sim.reset(Some(3));
+        assert_eq!(sim.obs_size(), 41);
+        assert_eq!(r.agents.len(), 2);
+        assert!(r.agents.contains_key("agent_0"));
+        assert!(r.agents.contains_key("agent_1"));
+        assert_eq!(r.agents["agent_0"].flat_obs.len(), 41);
+        assert_eq!(sim.fighters.len(), 4);
+    }
 }
