@@ -26,6 +26,7 @@ pub enum EndCondition {
     Ongoing,
     BlueKilled,
     RedKilled,
+    MutualKill,
     MaxCycles,
     RedMission,
 }
@@ -387,6 +388,15 @@ impl Simulation {
         let blue_alive = self.fighters.iter().filter(|f| f.team == 0 && f.alive).count();
         let red_alive = self.fighters.iter().filter(|f| f.team == 1 && f.alive).count();
         let missiles_left = !self.missiles.is_empty();
+
+        // Both teams dead: do not wait for leftover missiles (they only coast).
+        if blue_alive == 0 && red_alive == 0 {
+            self.end = EndCondition::MutualKill;
+            for f in self.fighters.iter_mut() {
+                f.done = true;
+            }
+            return;
+        }
 
         if blue_alive == 0 && !missiles_left {
             self.end = EndCondition::BlueKilled;
@@ -754,7 +764,10 @@ mod tests {
             }
             last = sim.step(&empty);
         }
-        let kill = matches!(last.end, EndCondition::RedKilled | EndCondition::BlueKilled);
+        let kill = matches!(
+            last.end,
+            EndCondition::RedKilled | EndCondition::BlueKilled | EndCondition::MutualKill
+        );
         assert!(
             saw_missile || kill,
             "baseline vs duck should fire or produce a kill, ended {:?}",
@@ -781,7 +794,10 @@ mod tests {
         assert!(
             matches!(
                 last.end,
-                EndCondition::RedKilled | EndCondition::BlueKilled | EndCondition::MaxCycles
+                EndCondition::RedKilled
+                    | EndCondition::BlueKilled
+                    | EndCondition::MutualKill
+                    | EndCondition::MaxCycles
             ),
             "unexpected end {:?}",
             last.end
@@ -807,5 +823,71 @@ mod tests {
         assert!(r.agents.contains_key("agent_1"));
         assert_eq!(r.agents["agent_0"].flat_obs.len(), 41);
         assert_eq!(sim.fighters.len(), 4);
+    }
+
+    fn line_abreast_4v4(blue: Behavior, red: Behavior, max_cycles: u32) -> ScenarioConfig {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = max_cycles;
+        cfg.blue.num_agents = 4;
+        cfg.red.num_agents = 4;
+        cfg.blue.behavior = blue;
+        cfg.red.behavior = red;
+        cfg.blue.offset_pos.x = 2.0;
+        cfg.red.offset_pos.x = 2.0;
+        cfg
+    }
+
+    #[test]
+    fn four_v_four_obs_and_spawn() {
+        let mut sim = Simulation::new(line_abreast_4v4(Behavior::Duck, Behavior::Duck, 5));
+        let r = sim.reset(Some(1));
+        assert_eq!(sim.obs_size(), 79);
+        assert_eq!(r.agents.len(), 4);
+        assert_eq!(sim.fighters.len(), 8);
+        let snap = sim.snapshot();
+        let xs: Vec<f64> = snap
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0)
+            .map(|f| f.pos[0])
+            .collect();
+        assert!(xs[1] > xs[0], "blue line-abreast should be spaced in x");
+    }
+
+    #[test]
+    fn four_v_four_baseline_vs_duck() {
+        let mut sim = Simulation::new(line_abreast_4v4(Behavior::Baseline1, Behavior::Duck, 400));
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        let mut last = sim.step(&empty);
+        while last.end == EndCondition::Ongoing {
+            last = sim.step(&empty);
+        }
+        assert_eq!(last.end, EndCondition::RedKilled);
+        assert_eq!(sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count(), 4);
+        assert_eq!(sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count(), 0);
+        assert_eq!(last.agents.len(), 4);
+    }
+
+    #[test]
+    fn four_v_four_baseline_vs_baseline_ends() {
+        let mut sim =
+            Simulation::new(line_abreast_4v4(Behavior::Baseline1, Behavior::Baseline1, 400));
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        let mut last = sim.step(&empty);
+        while last.end == EndCondition::Ongoing {
+            last = sim.step(&empty);
+        }
+        assert_ne!(last.end, EndCondition::Ongoing);
+        let blue_alive = sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count();
+        let red_alive = sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count();
+        assert!(
+            blue_alive == 0 || red_alive == 0 || last.end == EndCondition::MaxCycles,
+            "4v4 b1 vs b1 should kill a side or hit max cycles, end={:?} alive={}/{}",
+            last.end,
+            blue_alive,
+            red_alive
+        );
     }
 }

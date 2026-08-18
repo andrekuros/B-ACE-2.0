@@ -104,6 +104,39 @@ def test_snapshot_has_fighters():
     env.close()
 
 
+def test_four_v_four_obs_and_episode():
+    env = BaceEnv(
+        {
+            "env": {"max_cycles": 400, "seed": 1, "action_repeat": 20},
+            "blue": {
+                "num_agents": 4,
+                "behavior": "baseline1",
+                "offset_pos": {"x": 2.0, "y": 0.0, "z": 0.0},
+            },
+            "red": {
+                "num_agents": 4,
+                "behavior": "duck",
+                "offset_pos": {"x": 2.0, "y": 0.0, "z": 0.0},
+            },
+        }
+    )
+    obs, _ = env.reset(seed=1)
+    assert env._obs_size == 79
+    assert set(obs) == {f"agent_{i}" for i in range(4)}
+    assert len(env.state()["fighters"]) == 8
+    last_end = None
+    for _ in range(420):
+        if not env.agents:
+            break
+        actions = {a: np.zeros(4, dtype=np.float32) for a in env.agents}
+        _, _, terms, truncs, _ = env.step(actions)
+        last_end = env.state()["end"]
+        if all(terms.values()) or all(truncs.values()):
+            break
+    assert last_end == "red_killed"
+    env.close()
+
+
 def test_baseline_episode_runs():
     env = BaceEnv(
         {
