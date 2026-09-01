@@ -1,0 +1,35 @@
+{
+  "env": {
+    "max_cycles": 400,
+    "seed": 1
+  },
+  "blue": {
+    "num_agents": 1,
+    "behavior": "external",
+    "offset_pos": {
+      "x": 4.0,
+      "y": 0.0,
+      "z": 0.0
+    }
+  },
+  "red": {
+    "num_agents": 1,
+    "behavior": "baseline1",
+    "beh_config": {
+      "d_shot": [
+        1.1819713160808818
+      ],
+      "l_crank": [
+        0.8838649274916285
+      ],
+      "l_break": [
+        0.9567848689197221
+      ]
+    },
+    "offset_pos": {
+      "x": 4.0,
+      "y": 0.0,
+      "z": 0.0
+    }
+  }
+}

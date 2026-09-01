@@ -47,6 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/jobs/:id/step", post(step_job))
         .route("/jobs/:id/ws", get(job_ws))
         .route("/experiment", post(run_experiment_api))
+        .route("/experiments", get(list_experiments))
         .with_state(state)
 }
 
@@ -75,6 +76,7 @@ pub struct CreateJobRequest {
     pub record: Option<bool>,
     pub blue_behavior: Option<String>,
     pub red_behavior: Option<String>,
+    pub num_agents: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +90,7 @@ fn parse_behavior(s: &str) -> Behavior {
     match s {
         "external" => Behavior::External,
         "duck" => Behavior::Duck,
+        "fire_once" => Behavior::FireOnce,
         _ => Behavior::Baseline1,
     }
 }
@@ -108,6 +111,11 @@ async fn create_job(
     if let Some(r) = &req.red_behavior {
         scenario.red.behavior = parse_behavior(r);
     }
+    let n_agents = req.num_agents.unwrap_or(1).clamp(1, 4);
+    scenario.blue.num_agents = n_agents;
+    scenario.red.num_agents = n_agents;
+    scenario.blue.apply_box_formation();
+    scenario.red.apply_box_formation();
     let num = req.num_envs.unwrap_or(4).clamp(1, 64);
     let cfg = VecEnvConfig {
         num_envs: num,
@@ -231,39 +239,76 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>, id: String) {
 
 #[derive(Debug, Deserialize)]
 pub struct ExperimentRequest {
-    pub cases: usize,
+    pub recipe: Option<String>,
+    pub cases: Option<usize>,
     pub max_cycles: Option<u32>,
+    pub generations: Option<usize>,
+    pub repeats: Option<usize>,
+    pub pop: Option<usize>,
+    pub episodes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecipeInfo {
+    pub id: String,
+    pub label: String,
+    pub defaults: serde_json::Value,
+}
+
+async fn list_experiments() -> Json<Vec<RecipeInfo>> {
+    Json(vec![
+        RecipeInfo {
+            id: "wez".into(),
+            label: "WEZ validation".into(),
+            defaults: serde_json::to_value(bace_vec::recipes::WezParams::default())
+                .unwrap_or_default(),
+        },
+        RecipeInfo {
+            id: "fsm".into(),
+            label: "FSM search".into(),
+            defaults: serde_json::to_value(bace_vec::recipes::FsmParams::default())
+                .unwrap_or_default(),
+        },
+    ])
 }
 
 async fn run_experiment_api(Json(req): Json<ExperimentRequest>) -> Json<serde_json::Value> {
-    let n = req.cases.clamp(1, 256);
-    let mut cases = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.seed = i as u64 + 1;
-        cfg.env.max_cycles = req.max_cycles.unwrap_or(200);
-        cfg.blue.behavior = Behavior::Baseline1;
-        cfg.red.behavior = Behavior::Duck;
-        // vary d_shot slightly
-        let d = 0.7 + (i as f64) * 0.01;
-        cfg.blue.beh_config.d_shot = vec![d];
-        cases.push(cfg);
-    }
-    let results = bace_vec::run_experiment(cases, 8);
-    let wins = results
-        .iter()
-        .filter(|(_, e, _)| *e == EndCondition::RedKilled)
-        .count();
-    Json(serde_json::json!({
-        "cases": results.len(),
-        "red_killed": wins,
-        "results": results.iter().map(|(c,e,s)| serde_json::json!({
-            "seed": c.env.seed,
-            "d_shot": c.blue.beh_config.d_shot,
-            "end": format!("{:?}", e),
-            "steps": s,
-        })).collect::<Vec<_>>(),
-    }))
+    let recipe = req
+        .recipe
+        .as_deref()
+        .unwrap_or("wez")
+        .to_ascii_lowercase();
+    let report = tokio::task::spawn_blocking(move || match recipe.as_str() {
+        "fsm" => {
+            let mut params = bace_vec::recipes::FsmParams::default();
+            if let Some(p) = req.pop.or(req.cases) {
+                params.pop = p.clamp(2, 32);
+            }
+            if let Some(g) = req.generations {
+                params.generations = g.clamp(1, 30);
+            }
+            if let Some(e) = req.episodes {
+                params.episodes = e.clamp(1, 16);
+            }
+            if let Some(m) = req.max_cycles {
+                params.max_cycles = m;
+            }
+            serde_json::to_value(bace_vec::recipes::run_fsm_search(params, 8)).unwrap_or_default()
+        }
+        _ => {
+            let mut params = bace_vec::recipes::WezParams::default();
+            if let Some(r) = req.repeats.or(req.cases) {
+                params.repeats = r.clamp(1, 8);
+            }
+            if let Some(m) = req.max_cycles {
+                params.max_cycles = m;
+            }
+            serde_json::to_value(bace_vec::recipes::run_wez(params, 8)).unwrap_or_default()
+        }
+    })
+    .await
+    .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}));
+    Json(report)
 }
 
 #[allow(dead_code)]

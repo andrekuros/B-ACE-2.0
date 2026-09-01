@@ -40,7 +40,13 @@ main { flex: 1; }
 canvas { width: 100%; max-width: 1000px; background: linear-gradient(180deg, #0f1a24, #152433); border: 1px solid var(--line); border-radius: 8px; display: block; }
 .meta, .inspect { margin-top: 0.75rem; font-family: var(--mono); font-size: 0.8rem; color: var(--muted); white-space: pre-wrap; }
 .scrub { display: flex; flex-direction: column; gap: 0.5rem; }
-.row { display: flex; gap: 0.5rem; align-items: center; }
+.panel select { width: 9rem; background: var(--bg2); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 0.35rem 0.45rem; font-family: var(--mono); }
+.table-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--line); border-radius: 8px; }
+#exp-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.78rem; }
+#exp-table th, #exp-table td { text-align: left; padding: 0.4rem 0.55rem; border-bottom: 1px solid var(--line); }
+#exp-table th { color: var(--muted); position: sticky; top: 0; background: var(--bg1); }
+#exp-table tr:hover td { background: rgba(62, 207, 142, 0.06); }
+.hidden { display: none !important; }
 
 @media (max-width: 860px) {
   .view { grid-template-columns: 1fr; }

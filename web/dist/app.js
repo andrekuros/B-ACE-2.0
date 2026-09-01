@@ -7,6 +7,7 @@ const state = {
   episode: null,
   replayIdx: 0,
   playing: false,
+  trails: new Map(),
 };
 
 function $(id) { return document.getElementById(id); }
@@ -43,48 +44,79 @@ async function refreshHealth() {
   }
 }
 
-function worldToCanvas(pos, canvas) {
-  // pos in GDM; map ±80 NM (~±1480 GDM) into canvas
-  const scale = canvas.width / (160 * 18.52);
-  const cx = canvas.width / 2;
-  const cy = canvas.height / 2;
-  return [cx + pos[0] * scale, cy + pos[2] * scale];
+function worldToCanvas(pos, w, h) {
+  // pos in GDM; map ±80 NM (~±1480 GDM) into a tile
+  const scale = w / (160 * 18.52);
+  return [w / 2 + pos[0] * scale, h / 2 + pos[2] * scale];
 }
 
 function drawSnapshots(canvas, snapshots) {
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = "rgba(138,160,181,0.2)";
-  ctx.beginPath();
-  ctx.moveTo(canvas.width / 2, 0);
-  ctx.lineTo(canvas.width / 2, canvas.height);
-  ctx.moveTo(0, canvas.height / 2);
-  ctx.lineTo(canvas.width, canvas.height / 2);
-  ctx.stroke();
+  const n = Math.max(1, (snapshots || []).length);
+  const cols = n <= 1 ? 1 : 2;
+  const rows = Math.ceil(n / cols);
+  const tw = canvas.width / cols;
+  const th = canvas.height / rows;
 
   (snapshots || []).forEach((snap, envIdx) => {
-    const ox = (envIdx % 2) * 8;
-    const oy = Math.floor(envIdx / 2) * 8;
+    const col = envIdx % cols;
+    const row = Math.floor(envIdx / cols);
+    const ox = col * tw;
+    const oy = row * th;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, tw, th);
+    ctx.clip();
+    ctx.strokeStyle = "rgba(138,160,181,0.25)";
+    ctx.beginPath();
+    ctx.moveTo(ox + tw / 2, oy);
+    ctx.lineTo(ox + tw / 2, oy + th);
+    ctx.moveTo(ox, oy + th / 2);
+    ctx.lineTo(ox + tw, oy + th / 2);
+    ctx.stroke();
+    if (n > 1) {
+      ctx.fillStyle = "rgba(138,160,181,0.7)";
+      ctx.font = "11px IBM Plex Mono, monospace";
+      ctx.fillText(`env ${envIdx}`, ox + 8, oy + 14);
+    }
     (snap.fighters || []).forEach((f) => {
-      const [x, y] = worldToCanvas(f.pos, canvas);
+      const key = `${envIdx}-${f.id}`;
+      let trail = state.trails.get(key);
+      if (!trail) {
+        trail = [];
+        state.trails.set(key, trail);
+      }
+      const [lx, ly] = worldToCanvas(f.pos, tw, th);
+      trail.push([ox + lx, oy + ly]);
+      if (trail.length > 80) trail.shift();
+      ctx.strokeStyle = f.team === 0 ? "rgba(74,163,255,0.45)" : "rgba(255,107,90,0.45)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      trail.forEach((p, i) => (i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])));
+      ctx.stroke();
+      const r = (snap.fighters || []).length > 4 ? 3.5 : 5;
       ctx.fillStyle = f.team === 0 ? "#4aa3ff" : "#ff6b5a";
       ctx.globalAlpha = f.alive ? 1 : 0.25;
       ctx.beginPath();
-      ctx.arc(x + ox, y + oy, 5, 0, Math.PI * 2);
+      ctx.arc(ox + lx, oy + ly, r, 0, Math.PI * 2);
       ctx.fill();
       const rad = (f.hdg * Math.PI) / 180;
       ctx.strokeStyle = ctx.fillStyle;
       ctx.beginPath();
-      ctx.moveTo(x + ox, y + oy);
-      ctx.lineTo(x + ox + Math.sin(rad) * 14, y + oy - Math.cos(rad) * 14);
+      ctx.moveTo(ox + lx, oy + ly);
+      ctx.lineTo(ox + lx + Math.sin(rad) * 12, oy + ly - Math.cos(rad) * 12);
       ctx.stroke();
       ctx.globalAlpha = 1;
     });
     (snap.missiles || []).forEach((m) => {
-      const [x, y] = worldToCanvas(m.pos, canvas);
+      const [x, y] = worldToCanvas(m.pos, tw, th);
       ctx.fillStyle = m.pitbull ? "#ffd166" : "#c4b5fd";
-      ctx.fillRect(x - 2, y - 2, 4, 4);
+      ctx.fillRect(ox + x - 2, oy + y - 2, 4, 4);
     });
+    ctx.restore();
+    ctx.strokeStyle = "rgba(138,160,181,0.35)";
+    ctx.strokeRect(ox + 0.5, oy + 0.5, tw - 1, th - 1);
   });
 }
 
@@ -103,6 +135,7 @@ async function refreshJobs() {
 
 function connectJob(id) {
   state.jobId = id;
+  state.trails = new Map();
   if (state.ws) state.ws.close();
   const proto = location.protocol === "https:" ? "wss" : "ws";
   state.ws = new WebSocket(`${proto}://${location.host}/api/jobs/${id}/ws`);
@@ -120,6 +153,7 @@ $("start-job").onclick = async () => {
     method: "POST",
     body: JSON.stringify({
       num_envs: Number($("num-envs").value),
+      num_agents: Number($("num-agents") ? $("num-agents").value : 1),
       max_cycles: Number($("max-cycles").value),
       record: true,
       blue_behavior: "baseline1",
@@ -145,6 +179,7 @@ async function refreshRuns() {
 async function loadRun(id) {
   state.episode = await api(`/runs/${id}`);
   state.replayIdx = 0;
+  state.trails = new Map();
   $("scrubber").max = Math.max(0, (state.episode.steps || []).length - 1);
   $("scrubber").value = 0;
   renderReplay();
@@ -191,14 +226,57 @@ setInterval(() => {
 
 $("run-exp").onclick = async () => {
   $("exp-out").textContent = "running…";
+  $("exp-summary").textContent = "";
+  const recipe = $("exp-recipe").value;
+  const body = {
+    recipe,
+    max_cycles: Number($("exp-cycles").value),
+  };
+  if (recipe === "fsm") {
+    body.pop = Number($("exp-cases").value);
+    body.generations = Number($("exp-gens").value);
+  } else {
+    body.repeats = Number($("exp-cases").value);
+  }
   const out = await api("/experiment", {
     method: "POST",
-    body: JSON.stringify({
-      cases: Number($("exp-cases").value),
-      max_cycles: Number($("exp-cycles").value),
-    }),
+    body: JSON.stringify(body),
   });
-  $("exp-out").textContent = JSON.stringify(out, null, 2);
+  $("exp-summary").textContent = out.summary || "";
+  fillExpTable(recipe, out);
+  $("exp-out").textContent = JSON.stringify(
+    { recipe: out.recipe, summary: out.summary, params: out.params, elites: out.elites },
+    null,
+    2
+  );
+};
+
+function fillExpTable(recipe, out) {
+  const thead = $("exp-table").querySelector("thead");
+  const tbody = $("exp-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  if (recipe === "wez") {
+    thead.innerHTML = "<tr><th>range</th><th>alt</th><th>aspect</th><th>n</th><th>hits</th><th>hit rate</th><th>RMax</th></tr>";
+    (out.cells || []).forEach((c) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${c.range_nm}</td><td>${c.altitude_ft}</td><td>${c.aspect}</td><td>${c.n}</td><td>${c.hits}</td><td>${(c.hit_rate || 0).toFixed(2)}</td><td>${(c.analytic_rmax_nm || 0).toFixed(1)}</td>`;
+      tbody.appendChild(tr);
+    });
+  } else {
+    thead.innerHTML = "<tr><th>d_shot</th><th>l_crank</th><th>l_break</th><th>fitness</th><th>kills</th><th>deaths</th><th>mission</th></tr>";
+    (out.last_generation || []).forEach((r) => {
+      const g = r.genome || {};
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${(g.d_shot || 0).toFixed(3)}</td><td>${(g.l_crank || 0).toFixed(3)}</td><td>${(g.l_break || 0).toFixed(3)}</td><td>${(r.fitness || 0).toFixed(3)}</td><td>${(r.mean_kills || 0).toFixed(2)}</td><td>${(r.mean_deaths || 0).toFixed(2)}</td><td>${(r.mission_rate || 0).toFixed(2)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+$("exp-recipe").onchange = () => {
+  const fsm = $("exp-recipe").value === "fsm";
+  $("exp-gen-row").classList.toggle("hidden", !fsm);
+  $("exp-cases-label").childNodes[0].textContent = fsm ? "Pop " : "Repeats / pop ";
 };
 
 refreshHealth();

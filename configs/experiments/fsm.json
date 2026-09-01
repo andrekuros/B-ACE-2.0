@@ -1,0 +1,10 @@
+{
+  "pop": 16,
+  "generations": 15,
+  "episodes": 8,
+  "max_cycles": 200,
+  "seed": 1,
+  "num_agents": 2,
+  "eval_agents": 0,
+  "pool_interval": 3
+}

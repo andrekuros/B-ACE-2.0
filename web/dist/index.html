@@ -29,6 +29,7 @@
         <aside class="panel">
           <h2>Parallel jobs</h2>
           <label>Envs <input id="num-envs" type="number" min="1" max="32" value="4" /></label>
+          <label>Agents / side <input id="num-agents" type="number" min="1" max="4" value="2" /></label>
           <label>Max cycles <input id="max-cycles" type="number" min="10" value="200" /></label>
           <button id="start-job" class="cta">Start simulation</button>
           <ul id="job-list"></ul>
@@ -61,11 +62,25 @@
       <section id="view-experiment" class="view hidden">
         <aside class="panel">
           <h2>Batch experiment</h2>
-          <label>Cases <input id="exp-cases" type="number" min="1" max="128" value="16" /></label>
+          <label>Recipe
+            <select id="exp-recipe">
+              <option value="wez">WEZ validation</option>
+              <option value="fsm">FSM search</option>
+            </select>
+          </label>
+          <label id="exp-cases-label">Repeats / pop <input id="exp-cases" type="number" min="1" max="32" value="4" /></label>
           <label>Max cycles <input id="exp-cycles" type="number" min="20" value="150" /></label>
+          <label id="exp-gen-row" class="hidden">Generations <input id="exp-gens" type="number" min="1" max="30" value="5" /></label>
           <button id="run-exp" class="cta">Run experiment</button>
+          <p id="exp-summary" class="meta"></p>
         </aside>
         <div class="stage">
+          <div class="table-wrap">
+            <table id="exp-table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
           <pre id="exp-out" class="inspect"></pre>
         </div>
       </section>

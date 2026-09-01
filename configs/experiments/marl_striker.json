@@ -1,0 +1,10 @@
+{
+  "algo": "mappo",
+  "steps": 2500,
+  "eval_episodes": 20,
+  "sizes": [2, 4],
+  "opponent": "fsm",
+  "seeds": [0, 1, 2],
+  "red_mission": "striker",
+  "share_tracks": true
+}

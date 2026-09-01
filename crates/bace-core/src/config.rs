@@ -8,6 +8,8 @@ pub enum Behavior {
     External,
     Baseline1,
     Duck,
+    /// Fire a single missile when a track is detected, then fly toward the target.
+    FireOnce,
 }
 
 impl Default for Behavior {
@@ -96,6 +98,28 @@ pub struct TeamConfig {
     pub rnd_offset_range: Vec3Config,
 }
 
+impl TeamConfig {
+    pub const MAX_AGENTS: usize = 4;
+
+    pub fn clamp_agents(&mut self) {
+        self.num_agents = self.num_agents.clamp(1, Self::MAX_AGENTS);
+    }
+
+    /// 2-ship line or 2×2 block at 4 NM if the caller did not set `offset_pos`.
+    pub fn apply_box_formation(&mut self) {
+        self.clamp_agents();
+        if self.num_agents <= 1 {
+            return;
+        }
+        if self.offset_pos.x.abs() < 1e-9 && self.offset_pos.z.abs() < 1e-9 {
+            self.offset_pos.x = 4.0;
+            if self.num_agents >= 3 {
+                self.offset_pos.z = 4.0;
+            }
+        }
+    }
+}
+
 impl Default for TeamConfig {
     fn default() -> Self {
         Self {
@@ -137,6 +161,23 @@ pub struct RewardsConfig {
     pub hit_enemy_factor: f64,
     pub hit_own_factor: f64,
     pub mission_accomplished_factor: f64,
+}
+
+impl RewardsConfig {
+    /// Denser combat signal: drop no-fire spam, shrink detect-loss.
+    pub fn rl() -> Self {
+        Self {
+            mission_factor: 0.001,
+            missile_fire_factor: -0.1,
+            missile_no_fire_factor: 0.0,
+            missile_miss_factor: -0.5,
+            detect_loss_factor: -0.01,
+            keep_track_factor: 0.001,
+            hit_enemy_factor: 3.0,
+            hit_own_factor: -5.0,
+            mission_accomplished_factor: 10.0,
+        }
+    }
 }
 
 impl Default for RewardsConfig {

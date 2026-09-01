@@ -19,6 +19,10 @@ pub struct Missile {
     pub time_alive: f64,
     pub max_time: f64,
     pub hit_radius: f64,
+    /// Seconds after launch when pitbull first engaged.
+    pub pitbull_time: Option<f64>,
+    /// Set when the missile dies without a hit: `"timeout"` or `"lost_support"`.
+    pub miss_cause: Option<String>,
 }
 
 impl Missile {
@@ -44,6 +48,8 @@ impl Missile {
             time_alive: 0.0,
             max_time: 120.0,
             hit_radius: 0.5, // 50m
+            pitbull_time: None,
+            miss_cause: None,
         }
     }
 
@@ -65,14 +71,16 @@ impl Missile {
         self.time_alive += dt;
         if self.time_alive > self.max_time {
             self.alive = false;
+            self.miss_cause = Some("timeout".into());
             return false;
         }
 
         if let Some(tp) = target_pos {
             let range = distance2d(self.pos, tp);
             // Pitbull at ~10 NM
-            if range < 10.0 * SConv::NM2GDM {
+            if range < 10.0 * SConv::NM2GDM && !self.pitbull {
                 self.pitbull = true;
+                self.pitbull_time = Some(self.time_alive);
             }
 
             let can_guide = self.pitbull || self.has_support;
@@ -86,6 +94,7 @@ impl Missile {
 
                 if range < self.hit_radius {
                     self.alive = false;
+                    self.miss_cause = None;
                     return true;
                 }
             } else if !target_alive {
@@ -97,6 +106,7 @@ impl Missile {
                 // without support and no pitbull, die sooner
                 if !self.has_support && self.time_alive > 15.0 {
                     self.alive = false;
+                    self.miss_cause = Some("lost_support".into());
                     return false;
                 }
             }

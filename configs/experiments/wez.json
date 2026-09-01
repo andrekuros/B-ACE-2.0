@@ -1,0 +1,8 @@
+{
+  "ranges_nm": [8, 16, 24, 32, 40],
+  "altitudes_ft": [10000, 25000, 40000],
+  "aspects": ["head", "beam", "tail"],
+  "repeats": 4,
+  "max_cycles": 150,
+  "seed": 1
+}

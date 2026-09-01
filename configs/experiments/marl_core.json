@@ -1,0 +1,12 @@
+{
+  "steps": 100000,
+  "eval_episodes": 50,
+  "max_cycles": 200,
+  "algos": ["mappo", "maddpg", "ippo"],
+  "sizes": [2],
+  "opponents": ["duck", "fsm"],
+  "seeds": [0, 1, 2],
+  "share_tracks": true,
+  "red_mission": "dca",
+  "ppo_1v1_steps": 200000
+}

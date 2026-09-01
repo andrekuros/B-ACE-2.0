@@ -87,3 +87,27 @@ def test_episode_terminates():
             break
     assert done
     env.close()
+
+
+def test_vec_env_parallel_1v1_duck():
+    from bace import BaceVecEnv
+
+    env = BaceVecEnv(num_envs=8, opponent="duck", agents=1, max_cycles=12, seed=1)
+    assert env.num_envs == 8
+    steps = env.reset(seed=1)
+    assert len(steps) == 8
+    assert "agent_0" in steps[0]["obs"]
+    idle = {"agent_0": np.zeros(4, dtype=np.float32)}
+    out = env.step([idle] * 8)
+    assert len(out) == 8
+    assert "agent_0" in out[0]["rewards"]
+    env.close()
+
+
+def test_make_env_rl_rewards():
+    from bace import make_env
+
+    env = make_env(opponent="duck", agents=1, max_cycles=4, seed=1, rewards="rl")
+    assert env._config["env"]["rewards"]["missile_no_fire_factor"] == 0.0
+    assert env._config["env"]["rewards"]["detect_loss_factor"] == -0.01
+    env.close()

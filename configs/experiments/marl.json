@@ -1,0 +1,11 @@
+{
+  "steps": 200000,
+  "opponent": "duck",
+  "agents": 1,
+  "algo": "ppo",
+  "seed": 0,
+  "eval_episodes": 50,
+  "n_envs": 8,
+  "rewards": "rl",
+  "action_type": "discrete"
+}

@@ -7,9 +7,12 @@ Successor to [B-ACE 1.0](https://github.com/andrekuros/B-ACE) (Godot + TCP/JSON)
 ## Highlights
 
 - High-performance **Rust** sim core (`bace-core`) with in-process parallel envs (`bace-vec`)
-- Clean **PettingZoo ParallelEnv** API via PyO3
-- **Web dashboard** for live parallel runs and episode replay
-- Experiment mode + GA examples without a game-engine binary
+- Clean **PettingZoo ParallelEnv** API via PyO3 (`from bace import BaceEnv, make_env`)
+- **Web dashboard** for live parallel runs, episode replay, and WEZ / FSM recipes
+- Three study-case recipes: WEZ validation, FSM search, Tianshou/BenchMARL training
+- Vectorized `BaceVecEnv` (`NativeVecEnv`, rayon, `record=false`) and `python -m bace.bench`
+
+Only **blue** can be `external` (learning) in this release. Red uses `baseline1`, `duck`, or `fire_once`.
 
 ## Quick start
 
@@ -32,51 +35,68 @@ cargo run -p bace-server -- --port 8787 --static-dir web/dist --runs-dir runs
 # open http://127.0.0.1:8787
 ```
 
+Start a live job (4 envs, baseline vs duck), then use Experiment → WEZ or FSM.
+
+## Demo path (framework release)
+
+0. `cargo test -p bace-core -p bace-vec` and `pytest -q tests/python`, then `python -m bace.examples.random_policy`
+1. Dashboard live: 4 envs, baseline vs duck
+2. `python -m bace.experiment wez`
+3. `python -m bace.experiment fsm` (writes `configs/baselines/{aggressive,balanced,cautious}.json`)
+4. `python -m bace.experiment marl` (Tianshou PPO 1v1; BenchMARL MAPPO/IPPO/MADDPG if `.[benchmarl]`). `--vs duck|fsm --agents 1|2`
+5. `python -m bace.bench` (throughput vs `n_envs`, PyO3 tax, WEZ/FSM wall-clock)
+
+Tiny CI-sized runs: add `--smoke` (or `--profile smoke`) to wez/fsm/marl.
+Paper-scale CLI profiles (`--profile paper`) stay in this repo; the draft and figures live in [B_ACE_2_Paper](https://github.com/andrekuros/B_ACE_2_Paper).
+
 ## Python API
 
 ```python
-from bace import BaceEnv
+from bace import BaceEnv, make_env
 
-env = BaceEnv({
-    "env": {"max_cycles": 500, "seed": 1},
-    "blue": {"num_agents": 1, "behavior": "external"},
-    "red": {"num_agents": 1, "behavior": "baseline1"},
-})
+env = make_env(opponent="duck", agents=1, max_cycles=500, seed=1)
 obs, infos = env.reset(seed=1)
 actions = {a: env.action_space(a).sample() for a in env.agents}
 obs, rewards, terms, truncs, infos = env.step(actions)
 ```
 
-Observations are exported as a flat `float32` vector: own(9) + enemies(13 each) + allies(6 each).  
-Continuous actions are `[d_heading, d_altitude, g_force, fire]` in `[-1, 1]`.
+`make_env(opponent=...)` accepts `duck`, `baseline`, `aggressive`, `balanced`, `cautious`, `fsm`. Caps at **4v4** with a 2×2 box spawn (4 NM). `share_tracks` and `red_mission="striker"` are keyword args.
 
-Behaviors: `external` (RL), `baseline1` (FSM), `duck`.
+Observations are exported as a flat `float32` vector: own(9) + enemies(13 each) + allies(6 each).
+Continuous actions are `[d_heading, d_altitude, g_force, fire]` in `[-1, 1]`.
+Set `"action_type": "discrete"` for `MultiDiscrete([2, 5, 5])` (fire, level, turn).
+
+Behaviors: `external` (RL, blue only), `baseline1` (FSM), `duck`, `fire_once`.
+
+Batch experiments:
+
+```python
+from bace import run_experiment
+results = run_experiment([{
+    "env": {"max_cycles": 80, "seed": 1},
+    "blue": {"behavior": "baseline1"},
+    "red": {"behavior": "duck"},
+}])
+```
 
 ## Layout
 
 | Path | Role |
 |------|------|
 | `crates/bace-core` | Physics, WEZ, missiles, radar, FSM, rewards |
-| `crates/bace-vec` | Batched parallel envs + experiment runner |
+| `crates/bace-vec` | Batched parallel envs + WEZ/FSM recipes |
 | `crates/bace-record` | Episode JSON recordings under `runs/` |
 | `crates/bace-py` | PyO3 native module |
 | `crates/bace-server` | Axum HTTP/WS dashboard API |
-| `python/bace` | PettingZoo wrapper |
-| `web/dist` | Live + replay UI |
-| `examples/` | Tianshou toy trainer, BenchMARL hook, experiment, GA |
-
-## Examples
-
-```bash
-python examples/tianshou/train_ddpg_toy.py --steps 200
-python examples/benchmarl/run_pettingzoo_smoke.py
-python examples/experiment/run_experiment.py --cases 8
-python examples/ga/optimize_fsm.py --generations 3 --pop 6
-```
+| `python/bace` | PettingZoo wrapper + experiment CLI |
+| `web/dist` | Live + replay + experiment UI |
+| `configs/experiments/` | WEZ, FSM, MARL recipe JSON |
+| `examples/` | Thin wrappers around the package CLI |
 
 ## Related
 
 - [B-ACE 1.0](https://github.com/andrekuros/B-ACE) — original Godot-based environment
+- [B_ACE_2_Paper](https://github.com/andrekuros/B_ACE_2_Paper) — working paper, figures, and reproduction script
 
 ## License
 

@@ -2,6 +2,7 @@
 
 use crate::config::{ScenarioConfig, TeamConfig};
 use crate::fighter::{AircraftView, Fighter, FsmState};
+use crate::geometry::distance2d;
 use crate::missile::Missile;
 use crate::obs::{Action, StructuredObs};
 use crate::rewards::RewardBreakdown;
@@ -76,6 +77,34 @@ pub struct SimSnapshot {
     pub missiles: Vec<MissileSnapshot>,
 }
 
+/// Compact end-of-episode metrics for experiment mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeOutcome {
+    pub config: ScenarioConfig,
+    pub end: EndCondition,
+    pub steps: u32,
+    pub seed: u64,
+    pub blue_alive: usize,
+    pub red_alive: usize,
+    pub blue_kills: usize,
+    pub blue_deaths: usize,
+    pub mission_success: bool,
+    pub episode_return: f64,
+    pub missiles_fired: u32,
+    pub missile_hits: u32,
+    pub missile_tof: f64,
+    pub missile_pitbull: bool,
+    pub missile_pitbull_time: f64,
+    pub miss_cause: String,
+    pub fsm_search: u32,
+    pub fsm_engage: u32,
+    pub fsm_support: u32,
+    pub fsm_evade: u32,
+    pub mean_ally_spacing_nm: f64,
+    pub mean_fire_range_nm: f64,
+    pub tracks_on_frac: f64,
+}
+
 pub struct Simulation {
     pub config: ScenarioConfig,
     pub fighters: Vec<Fighter>,
@@ -85,11 +114,30 @@ pub struct Simulation {
     pub physics_step: u32,
     pub end: EndCondition,
     pub next_missile_id: u32,
+    pub missiles_fired: u32,
+    pub missile_hits: u32,
     rng: StdRng,
+    last_missile_tof: f64,
+    last_missile_pitbull: bool,
+    last_missile_pitbull_time: f64,
+    last_miss_cause: String,
+    fsm_search: u32,
+    fsm_engage: u32,
+    fsm_support: u32,
+    fsm_evade: u32,
+    ally_spacing_sum: f64,
+    ally_spacing_n: u32,
+    fire_range_sum: f64,
+    fire_range_n: u32,
+    tracks_on_sum: f64,
+    tracks_on_n: u32,
 }
 
 impl Simulation {
     pub fn new(config: ScenarioConfig) -> Self {
+        let mut config = config;
+        config.blue.apply_box_formation();
+        config.red.apply_box_formation();
         let mut sim = Self {
             rng: StdRng::seed_from_u64(config.env.seed),
             config,
@@ -100,21 +148,50 @@ impl Simulation {
             physics_step: 0,
             end: EndCondition::Ongoing,
             next_missile_id: 1,
+            missiles_fired: 0,
+            missile_hits: 0,
+            last_missile_tof: 0.0,
+            last_missile_pitbull: false,
+            last_missile_pitbull_time: 0.0,
+            last_miss_cause: String::new(),
+            fsm_search: 0,
+            fsm_engage: 0,
+            fsm_support: 0,
+            fsm_evade: 0,
+            ally_spacing_sum: 0.0,
+            ally_spacing_n: 0,
+            fire_range_sum: 0.0,
+            fire_range_n: 0,
+            tracks_on_sum: 0.0,
+            tracks_on_n: 0,
         };
         sim.spawn_teams();
         sim
     }
 
+    fn formation_offset_nm(team: &TeamConfig, idx: usize) -> (f64, f64) {
+        let n = team.num_agents.clamp(1, TeamConfig::MAX_AGENTS);
+        let sx = team.offset_pos.x;
+        let sz = team.offset_pos.z;
+        if n <= 2 {
+            return (idx as f64 * sx, 0.0);
+        }
+        let col = (idx % 2) as f64;
+        let row = (idx / 2) as f64;
+        (col * sx, row * if sz.abs() > 1e-9 { sz } else { sx })
+    }
+
     fn pos_from_cfg(team: &TeamConfig, idx: usize, rng: &mut StdRng) -> ([f64; 3], [f64; 3], f64) {
+        let (dx, dz) = Self::formation_offset_nm(team, idx);
         let base = [
             team.init_position.x * SConv::NM2GDM
-                + idx as f64 * team.offset_pos.x * SConv::NM2GDM
+                + dx * SConv::NM2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.x * SConv::NM2GDM,
             team.init_position.y * SConv::FT2GDM
                 + idx as f64 * team.offset_pos.y * SConv::FT2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.y * SConv::FT2GDM,
             team.init_position.z * SConv::NM2GDM
-                + idx as f64 * team.offset_pos.z * SConv::NM2GDM
+                + dz * SConv::NM2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.z * SConv::NM2GDM,
         ];
         let target = [
@@ -188,6 +265,22 @@ impl Simulation {
         self.action_step = 0;
         self.physics_step = 0;
         self.end = EndCondition::Ongoing;
+        self.missiles_fired = 0;
+        self.missile_hits = 0;
+        self.last_missile_tof = 0.0;
+        self.last_missile_pitbull = false;
+        self.last_missile_pitbull_time = 0.0;
+        self.last_miss_cause = String::new();
+        self.fsm_search = 0;
+        self.fsm_engage = 0;
+        self.fsm_support = 0;
+        self.fsm_evade = 0;
+        self.ally_spacing_sum = 0.0;
+        self.ally_spacing_n = 0;
+        self.fire_range_sum = 0.0;
+        self.fire_range_n = 0;
+        self.tracks_on_sum = 0.0;
+        self.tracks_on_n = 0;
         self.spawn_teams();
         self.sense_and_observe(true)
     }
@@ -257,17 +350,17 @@ impl Simulation {
         }
     }
 
-    fn try_fire(fighter: &mut Fighter, missiles: &mut Vec<Missile>, next_id: &mut u32) {
+    fn try_fire(fighter: &mut Fighter, missiles: &mut Vec<Missile>, next_id: &mut u32) -> Option<f64> {
         if !fighter.alive || !fighter.fire_cmd {
-            return;
+            return None;
         }
         if fighter.missiles == 0 {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         }
         let Some(hpt) = fighter.hpt_id else {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         };
         let can_fire = fighter
             .enemy_tracks
@@ -277,8 +370,14 @@ impl Simulation {
             .unwrap_or(false);
         if !can_fire {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         }
+        let fire_range_nm = fighter
+            .enemy_tracks
+            .iter()
+            .find(|t| t.id == hpt)
+            .map(|t| t.dist * SConv::GDM2NM)
+            .unwrap_or(0.0);
         if let Some(mid) = fighter.in_flight_missile_id {
             if let Some(m) = missiles.iter_mut().find(|m| m.id == mid && m.alive) {
                 m.lost_support();
@@ -305,6 +404,7 @@ impl Simulation {
         fighter.rewards.add_missile_fire();
         missiles.push(m);
         fighter.fire_cmd = false;
+        Some(fire_range_nm)
     }
 
     fn integrate_physics(&mut self) {
@@ -336,13 +436,24 @@ impl Simulation {
                     .unwrap_or(([0.0; 3], false));
                 let hit = m.tick(dt, Some(tpos), talive);
                 if hit {
+                    self.last_missile_tof = m.time_alive;
+                    self.last_missile_pitbull = m.pitbull;
+                    self.last_missile_pitbull_time = m.pitbull_time.unwrap_or(0.0);
+                    self.last_miss_cause.clear();
                     hits.push((m.target_id, m.shooter_id, m.team));
                 } else if !m.alive {
+                    self.last_missile_tof = m.time_alive;
+                    self.last_missile_pitbull = m.pitbull;
+                    self.last_missile_pitbull_time = m.pitbull_time.unwrap_or(0.0);
+                    self.last_miss_cause = m.miss_cause.clone().unwrap_or_default();
                     misses.push(m.shooter_id);
                 }
             }
 
-            for (target_id, shooter_id, _team) in hits {
+            for (target_id, shooter_id, team) in hits {
+                if team == 0 {
+                    self.missile_hits += 1;
+                }
                 if let Some(victim) = self.fighters.iter_mut().find(|f| f.id == target_id) {
                     victim.alive = false;
                     victim.done = true;
@@ -378,6 +489,43 @@ impl Simulation {
             self.check_terminals();
         }
         self.action_step += 1;
+    }
+
+    fn accumulate_behavior_stats(&mut self) {
+        for f in self.fighters.iter().filter(|f| f.team == 0 && f.alive) {
+            match f.fsm {
+                FsmState::Search => self.fsm_search += 1,
+                FsmState::Engage => self.fsm_engage += 1,
+                FsmState::MissileSupport => self.fsm_support += 1,
+                FsmState::Evade => self.fsm_evade += 1,
+            }
+            let tot = f.enemy_tracks.len();
+            if tot > 0 {
+                let det = f.enemy_tracks.iter().filter(|t| t.detected).count();
+                self.tracks_on_sum += det as f64 / tot as f64;
+                self.tracks_on_n += 1;
+            }
+        }
+        let blues: Vec<[f64; 3]> = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0 && f.alive)
+            .map(|f| f.pos)
+            .collect();
+        if blues.len() >= 2 {
+            let mut s = 0.0;
+            let mut n = 0u32;
+            for i in 0..blues.len() {
+                for j in (i + 1)..blues.len() {
+                    s += distance2d(blues[i], blues[j]) * SConv::GDM2NM;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                self.ally_spacing_sum += s / n as f64;
+                self.ally_spacing_n += 1;
+            }
+        }
     }
 
     fn check_terminals(&mut self) {
@@ -527,11 +675,22 @@ impl Simulation {
             f.run_behavior();
         }
 
+        self.accumulate_behavior_stats();
+
         // Firing (needs mutable fighters + missiles)
         let mut next_id = self.next_missile_id;
         let mut missiles = std::mem::take(&mut self.missiles);
         for f in &mut self.fighters {
-            Self::try_fire(f, &mut missiles, &mut next_id);
+            let before = f.missiles;
+            if let Some(rng_nm) = Self::try_fire(f, &mut missiles, &mut next_id) {
+                if f.team == 0 {
+                    self.fire_range_sum += rng_nm;
+                    self.fire_range_n += 1;
+                }
+            }
+            if f.team == 0 && f.missiles < before {
+                self.missiles_fired += before - f.missiles;
+            }
         }
         self.missiles = missiles;
         self.next_missile_id = next_id;
@@ -639,6 +798,67 @@ impl Simulation {
         let n_red = self.config.red.num_agents;
         StructuredObs::flat_size(n_blue.saturating_sub(1), n_red)
     }
+
+    /// Snapshot experiment metrics for the current (usually finished) episode.
+    pub fn outcome(&self) -> EpisodeOutcome {
+        let n_blue = self.config.blue.num_agents;
+        let n_red = self.config.red.num_agents;
+        let blue_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0 && f.alive)
+            .count();
+        let red_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 1 && f.alive)
+            .count();
+        let episode_return: f64 = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0)
+            .map(|f| f.rewards.cumulative().total())
+            .sum();
+        let mission_success =
+            self.end != EndCondition::RedMission && self.end != EndCondition::BlueKilled;
+        EpisodeOutcome {
+            config: self.config.clone(),
+            end: self.end,
+            steps: self.action_step,
+            seed: self.config.env.seed,
+            blue_alive,
+            red_alive,
+            blue_kills: n_red.saturating_sub(red_alive),
+            blue_deaths: n_blue.saturating_sub(blue_alive),
+            mission_success,
+            episode_return,
+            missiles_fired: self.missiles_fired,
+            missile_hits: self.missile_hits,
+            missile_tof: self.last_missile_tof,
+            missile_pitbull: self.last_missile_pitbull,
+            missile_pitbull_time: self.last_missile_pitbull_time,
+            miss_cause: self.last_miss_cause.clone(),
+            fsm_search: self.fsm_search,
+            fsm_engage: self.fsm_engage,
+            fsm_support: self.fsm_support,
+            fsm_evade: self.fsm_evade,
+            mean_ally_spacing_nm: if self.ally_spacing_n > 0 {
+                self.ally_spacing_sum / self.ally_spacing_n as f64
+            } else {
+                0.0
+            },
+            mean_fire_range_nm: if self.fire_range_n > 0 {
+                self.fire_range_sum / self.fire_range_n as f64
+            } else {
+                0.0
+            },
+            tracks_on_frac: if self.tracks_on_n > 0 {
+                self.tracks_on_sum / self.tracks_on_n as f64
+            } else {
+                0.0
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -684,5 +904,65 @@ mod tests {
             assert!((fa.pos[0] - fb.pos[0]).abs() < 1e-9);
             assert!((fa.pos[2] - fb.pos[2]).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn fire_once_launches() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 40;
+        cfg.env.action_repeat = 10;
+        cfg.blue.behavior = Behavior::FireOnce;
+        cfg.blue.init_position.z = 8.0;
+        cfg.blue.target_position.z = -8.0;
+        cfg.red.behavior = Behavior::Duck;
+        cfg.red.init_position.z = -8.0;
+        cfg.red.init_hdg = 180.0;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        for _ in 0..15 {
+            sim.step(&empty);
+            if sim.missiles_fired > 0 {
+                break;
+            }
+        }
+        assert!(
+            sim.missiles_fired > 0,
+            "FireOnce should launch when a track is detected"
+        );
+        let out = sim.outcome();
+        assert_eq!(out.missiles_fired, sim.missiles_fired);
+    }
+
+    #[test]
+    fn four_v_four_box_and_terminates() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 30;
+        cfg.env.action_repeat = 10;
+        cfg.blue.num_agents = 4;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.num_agents = 4;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        assert_eq!(sim.fighters.len(), 8);
+        let blues: Vec<_> = sim.fighters.iter().filter(|f| f.team == 0).collect();
+        let dx = (blues[1].pos[0] - blues[0].pos[0]).abs() * SConv::GDM2NM;
+        assert!(
+            (dx - 4.0).abs() < 0.2,
+            "2×2 box should space ~4 NM, got {dx}"
+        );
+        sim.reset(Some(3));
+        let empty = HashMap::new();
+        let mut ended = false;
+        for _ in 0..40 {
+            let s = sim.step(&empty);
+            if s.end != EndCondition::Ongoing {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended || sim.action_step >= 30);
+        assert_eq!(sim.blue_agent_ids.len(), 4);
+        assert_eq!(sim.obs_size(), 9 + 13 * 4 + 6 * 3);
     }
 }

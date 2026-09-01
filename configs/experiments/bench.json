@@ -1,0 +1,6 @@
+{
+  "steps": 400,
+  "n_envs": [1, 2, 4, 8, 16, 32],
+  "phy_fps": 20,
+  "action_repeat": 20
+}

@@ -1,0 +1,10 @@
+{
+  "algo": "mappo",
+  "steps": 2500,
+  "eval_episodes": 20,
+  "agents": 2,
+  "opponents": ["duck", "fsm"],
+  "seeds": [0, 1, 2],
+  "share_tracks": false,
+  "red_mission": "dca"
+}
