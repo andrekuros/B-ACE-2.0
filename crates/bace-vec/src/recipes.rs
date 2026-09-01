@@ -238,6 +238,9 @@ pub fn summarize_wez(params: &WezParams, outcomes: Vec<EpisodeOutcome>) -> WezRe
                 let nhit = hits.iter().filter(|o| o.missile_hits > 0).count();
                 let fired = hits.iter().filter(|o| o.missiles_fired > 0).count();
                 let alt_gdm = alt * SConv::FT2GDM;
+                // Recipe geometry: target on the nose, angle-off = red heading
+                // (head 180 / beam 90 / tail 0). Same args as the live FSM call
+                // after the closing-speed WEZ rewrite.
                 let wez = wez::evaluate(alt_gdm, 0.0, aspect.angle_off_deg());
                 cells.push(WezCell {
                     range_nm: range,
@@ -440,7 +443,10 @@ pub struct FsmIndividualResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsmGeneration {
     pub generation: usize,
+    /// Frozen default-red fitness of the current best (the search curve).
     pub best_fitness: f64,
+    pub train_fitness: f64,
+    pub frozen_fitness: f64,
     pub best: FsmGenome,
     pub pool_size: usize,
 }
@@ -527,6 +533,55 @@ fn eval_genomes(
         .collect()
 }
 
+fn genome_l1(a: &FsmGenome, b: &FsmGenome) -> f64 {
+    (a.d_shot - b.d_shot).abs() + (a.l_crank - b.l_crank).abs() + (a.l_break - b.l_break).abs()
+}
+
+fn elite_from(label: &str, r: &FsmIndividualResult) -> FsmElite {
+    FsmElite {
+        label: label.into(),
+        genome: r.genome.clone(),
+        fitness: r.fitness,
+        mean_kills: r.mean_kills,
+        mean_deaths: r.mean_deaths,
+        mission_rate: r.mission_rate,
+        mean_shots: r.mean_shots,
+        eval_4v4: None,
+    }
+}
+
+/// Distinct aggressive / balanced / cautious labels. Drop a duplicate rather than
+/// reuse the same genome under two names.
+fn pick_distinct_elites(scored: &[FsmIndividualResult]) -> Vec<FsmElite> {
+    const EPS: f64 = 0.04;
+    if scored.is_empty() {
+        return Vec::new();
+    }
+    let balanced = &scored[0];
+    let mut elites = vec![elite_from("balanced", balanced)];
+
+    let mut used = vec![balanced.genome.clone()];
+    let distinct = |g: &FsmGenome, used: &[FsmGenome]| used.iter().all(|u| genome_l1(g, u) >= EPS);
+
+    if let Some(agg) = scored
+        .iter()
+        .filter(|r| distinct(&r.genome, &used))
+        .max_by(|a, b| a.mean_kills.partial_cmp(&b.mean_kills).unwrap())
+    {
+        elites.insert(0, elite_from("aggressive", agg));
+        used.push(agg.genome.clone());
+    }
+
+    if let Some(caut) = scored
+        .iter()
+        .filter(|r| distinct(&r.genome, &used))
+        .min_by(|a, b| a.mean_deaths.partial_cmp(&b.mean_deaths).unwrap())
+    {
+        elites.push(elite_from("cautious", caut));
+    }
+    elites
+}
+
 pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
     let mut rng = StdRng::seed_from_u64(params.seed);
     let mut pop: Vec<FsmGenome> = (0..params.pop.max(2))
@@ -551,9 +606,22 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
             n_agents,
         );
         last.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+        let train_fitness = last[0].fitness;
+        // Frozen test set: default red only, same seed schedule every generation.
+        let frozen = eval_genomes(
+            std::slice::from_ref(&last[0].genome),
+            &[default_red_genome()],
+            &params,
+            params.seed.wrapping_add(500_000),
+            max_parallel,
+            n_agents,
+        );
+        let frozen_fitness = frozen.first().map(|r| r.fitness).unwrap_or(train_fitness);
         history.push(FsmGeneration {
             generation: gen,
-            best_fitness: last[0].fitness,
+            best_fitness: frozen_fitness,
+            train_fitness,
+            frozen_fitness,
             best: last[0].genome.clone(),
             pool_size: red_pool.len(),
         });
@@ -586,50 +654,7 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
 
     let mut scored = last.clone();
     scored.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
-    let aggressive = scored
-        .iter()
-        .max_by(|a, b| a.mean_kills.partial_cmp(&b.mean_kills).unwrap())
-        .cloned()
-        .unwrap_or_else(|| scored[0].clone());
-    let cautious = scored
-        .iter()
-        .min_by(|a, b| a.mean_deaths.partial_cmp(&b.mean_deaths).unwrap())
-        .cloned()
-        .unwrap_or_else(|| scored[0].clone());
-    let balanced = scored[0].clone();
-
-    let mut elites = vec![
-        FsmElite {
-            label: "aggressive".into(),
-            genome: aggressive.genome.clone(),
-            fitness: aggressive.fitness,
-            mean_kills: aggressive.mean_kills,
-            mean_deaths: aggressive.mean_deaths,
-            mission_rate: aggressive.mission_rate,
-            mean_shots: aggressive.mean_shots,
-            eval_4v4: None,
-        },
-        FsmElite {
-            label: "balanced".into(),
-            genome: balanced.genome.clone(),
-            fitness: balanced.fitness,
-            mean_kills: balanced.mean_kills,
-            mean_deaths: balanced.mean_deaths,
-            mission_rate: balanced.mission_rate,
-            mean_shots: balanced.mean_shots,
-            eval_4v4: None,
-        },
-        FsmElite {
-            label: "cautious".into(),
-            genome: cautious.genome.clone(),
-            fitness: cautious.fitness,
-            mean_kills: cautious.mean_kills,
-            mean_deaths: cautious.mean_deaths,
-            mission_rate: cautious.mission_rate,
-            mean_shots: cautious.mean_shots,
-            eval_4v4: None,
-        },
-    ];
+    let mut elites = pick_distinct_elites(&scored);
 
     let eval_n = params.eval_agents;
     if eval_n >= 2 {
@@ -647,15 +672,21 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
         }
     }
 
+    let champ = elites
+        .iter()
+        .find(|e| e.label == "balanced")
+        .or_else(|| elites.first());
     let summary = format!(
-        "FSM search agents={} gen={} best_fit={:.3} K={:.2} D={:.2} mission={:.2} shots={:.2}",
+        "FSM search agents={} gen={} frozen_fit={:.3} train_fit={:.3} K={:.2} D={:.2} mission={:.2} shots={:.2} elites={}",
         n_agents,
         params.generations,
-        history.last().map(|h| h.best_fitness).unwrap_or(0.0),
-        elites[1].mean_kills,
-        elites[1].mean_deaths,
-        elites[1].mission_rate,
-        elites[1].mean_shots
+        history.last().map(|h| h.frozen_fitness).unwrap_or(0.0),
+        history.last().map(|h| h.train_fitness).unwrap_or(0.0),
+        champ.map(|e| e.mean_kills).unwrap_or(0.0),
+        champ.map(|e| e.mean_deaths).unwrap_or(0.0),
+        champ.map(|e| e.mission_rate).unwrap_or(0.0),
+        champ.map(|e| e.mean_shots).unwrap_or(0.0),
+        elites.iter().map(|e| e.label.as_str()).collect::<Vec<_>>().join(",")
     );
     FsmReport {
         recipe: "fsm".into(),
@@ -708,7 +739,8 @@ mod tests {
     fn fsm_one_gen() {
         let report = run_fsm_search(FsmParams::smoke(), 4);
         assert_eq!(report.history.len(), 1);
-        assert_eq!(report.elites.len(), 3);
+        assert!(!report.elites.is_empty());
+        assert!(report.history[0].frozen_fitness.is_finite());
         assert!(!report.last_generation.is_empty());
         assert!(report.last_generation[0].mean_shots >= 0.0);
     }

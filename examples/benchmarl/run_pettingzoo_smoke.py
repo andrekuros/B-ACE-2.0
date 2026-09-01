@@ -20,7 +20,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--vs", dest="opponent", default="duck")
     p.add_argument("--agents", type=int, default=2)
-    p.add_argument("--algo", default="mappo")
+    p.add_argument("--algo", default="ippo")
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
     env = make_benchmarl_env(opponent=args.opponent, agents=args.agents, max_cycles=40, seed=args.seed)

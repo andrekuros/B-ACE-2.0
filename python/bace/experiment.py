@@ -31,8 +31,50 @@ def _load_recipe_json(name: str) -> dict[str, Any]:
     return {}
 
 
+def _pava_decreasing(y: Any) -> Any:
+    np = __import__("numpy")
+    vals = [float(v) for v in y]
+    wts = [1.0] * len(vals)
+    i = 0
+    while i < len(vals) - 1:
+        if vals[i] >= vals[i + 1] - 1e-15:
+            i += 1
+            continue
+        merged = (wts[i] * vals[i] + wts[i + 1] * vals[i + 1]) / (wts[i] + wts[i + 1])
+        wts[i] = wts[i] + wts[i + 1]
+        vals[i] = merged
+        del vals[i + 1]
+        del wts[i + 1]
+        if i:
+            i -= 1
+    out = np.empty(int(round(sum(wts))))
+    k = 0
+    for v, w in zip(vals, wts):
+        c = int(round(w))
+        out[k : k + c] = v
+        k += c
+    return out
+
+
+def _crossing_p50(xs: Any, ys: Any) -> float:
+    np = __import__("numpy")
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if len(xs) == 0:
+        return 0.0
+    if ys[0] < 0.5:
+        return float(xs[0])
+    if ys[-1] >= 0.5:
+        return float(xs[-1])
+    for i in range(len(xs) - 1):
+        if ys[i] >= 0.5 > ys[i + 1]:
+            t = (ys[i] - 0.5) / (ys[i] - ys[i + 1] + 1e-9)
+            return float(xs[i] + t * (xs[i + 1] - xs[i]))
+    return float(xs[-1])
+
+
 def attach_wez_fits(report: dict[str, Any]) -> dict[str, Any]:
-    """4th-degree polynomial + logistic RMax/RNEZ per aspect/altitude."""
+    """Logistic and isotonic P50 envelopes; polynomial kept as a diagnostic overlay."""
     np = __import__("numpy")
     cells = report.get("cells", [])
     fits = []
@@ -52,19 +94,8 @@ def attach_wez_fits(report: dict[str, Any]) -> dict[str, Any]:
             ys = np.array([c["hit_rate"] for c in rows], dtype=float)
             deg = int(min(4, len(xs) - 1))
             coef = np.polyfit(xs, ys, deg)
-            poly = np.poly1d(coef)
-            grid = np.linspace(float(xs.min()), float(xs.max()), 200)
-            pg = np.clip(poly(grid), -0.2, 1.2)
-            rmax = float(xs[-1])
-            for r, p in zip(grid[::-1], pg[::-1]):
-                if p >= 0.5:
-                    rmax = float(r)
-                    break
-            rnez = float(xs[0])
-            for r, p in zip(grid, pg):
-                if p < 0.9:
-                    rnez = float(r)
-                    break
+            iso = _pava_decreasing(ys)
+            isotonic_p50 = _crossing_p50(xs, iso)
             best = (1e9, 0.4, float(xs.mean()))
             for k in np.linspace(0.05, 0.8, 16):
                 for r0 in np.linspace(float(xs.min()), float(xs.max()), 16):
@@ -72,16 +103,25 @@ def attach_wez_fits(report: dict[str, Any]) -> dict[str, Any]:
                     err = float(np.mean((pred - ys) ** 2))
                     if err < best[0]:
                         best = (err, float(k), float(r0))
+            logistic_p50 = float(best[2])
+            rnez = float(xs[0])
+            for r, p in zip(xs, iso):
+                if p < 0.9:
+                    rnez = float(r)
+                    break
             fits.append(
                 {
                     "altitude_ft": alt,
                     "aspect": asp,
                     "poly_coef": [float(c) for c in coef],
-                    "empirical_rmax_nm": rmax,
-                    "empirical_rnez_nm": rnez,
                     "logistic_k": best[1],
-                    "logistic_r0": best[2],
+                    "logistic_r0": logistic_p50,
+                    "logistic_p50_nm": logistic_p50,
+                    "isotonic_p50_nm": isotonic_p50,
+                    "empirical_rmax_nm": isotonic_p50,
+                    "empirical_rnez_nm": rnez,
                     "analytic_rmax_nm": float(rows[0].get("analytic_rmax_nm", 0.0)),
+                    "primary": "isotonic_p50",
                 }
             )
     report["fits"] = fits
@@ -445,22 +485,17 @@ def run_marl(
     opponent: str = "duck",
     agents: int = 1,
     out_dir: Optional[Path] = None,
-    algo: str = "ppo",
+    algo: str = "ippo",
     profile: str = "default",
     share_tracks: bool = True,
     red_mission: str = "dca",
 ) -> dict[str, Any]:
     if profile == "paper":
         recipe = _load_recipe_json("marl_core")
-        algo = str(recipe.get("algo", algo))
-        if algo == "ppo":
-            steps = int(recipe.get("ppo_1v1_steps", 200_000))
-            agents = 1
-            opponent = "duck"
-        else:
-            steps = int(recipe.get("steps", 100_000))
-            agents = max(1, min(4, int(recipe.get("agents", agents))))
-            opponent = str(recipe.get("opponent", opponent))
+        algo = str(recipe.get("algo", "ippo"))
+        steps = int(recipe.get("ppo_1v1_steps", 200_000))
+        agents = 1
+        opponent = "duck"
     elif profile == "smoke":
         steps = min(int(steps), 80)
         agents = min(agents, 2)
@@ -542,7 +577,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     p.add_argument("--vs", dest="opponent", default="duck")
     p.add_argument("--agents", type=int, default=1)
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--algo", default="ppo")
+    p.add_argument("--algo", default="ippo")
     args = p.parse_args(argv)
     profile = "smoke" if args.smoke else args.profile
 

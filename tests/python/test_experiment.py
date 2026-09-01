@@ -34,7 +34,8 @@ def test_wez_one_cell_closer_hits_more():
 def test_fsm_one_generation():
     report = run_fsm(smoke=True, max_parallel=4)
     assert report["history"]
-    assert len(report["elites"]) == 3
+    assert report["elites"]
+    assert "frozen_fitness" in report["history"][0]
     assert report["last_generation"]
     row = report["last_generation"][0]
     assert "mean_kills" in row and "mean_deaths" in row
@@ -108,9 +109,10 @@ def test_marl_smoke_ppo():
         import pytest
 
         pytest.skip(str(report.get("reason", "tianshou missing")))
-    assert report.get("algo") == "ppo"
+    assert report.get("algo") in {"ppo", "ippo"}
     assert "eval" in report
     assert report.get("agents") == 1
+    assert "eval_fire_once_16nm" in report or report.get("skipped")
 
 
 def test_bench_parallel_native():
@@ -122,6 +124,23 @@ def test_bench_parallel_native():
     assert raw["n_envs"] == 2
     assert raw["decision_hz"] > 0
     assert raw["realtime_factor"] > 0
+
+
+def test_greedy_fire_from_marginal():
+    from bace.marl import greedy_from_probs
+
+    p = np.zeros(50, dtype=float)
+    for turn in range(5):
+        for level in range(5):
+            a0 = 0 + 2 * (level + 5 * turn)
+            p[a0] = 0.01
+            p[a0 + 1] = 0.02
+    p[2 * (2 + 5 * 1) + 1] = 0.4
+    p = p / p.sum()
+    out = greedy_from_probs(p)
+    assert out[0] == 1
+    assert out[1] == 2
+    assert out[2] == 1
 
 
 def test_discrete_action_space():

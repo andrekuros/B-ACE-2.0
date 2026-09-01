@@ -148,6 +148,17 @@ impl NativeVecEnv {
         steps_to_py(py, &results)
     }
 
+    #[pyo3(signature = (index, seed=None))]
+    fn reset_at(&mut self, py: Python<'_>, index: usize, seed: Option<u64>) -> PyResult<PyObject> {
+        if index >= self.envs.num_envs() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "env index {index} out of range"
+            )));
+        }
+        let result = py.allow_threads(|| self.envs.reset_one(index, seed));
+        step_to_py(py, &result)
+    }
+
     fn step(&mut self, py: Python<'_>, actions: Bound<'_, PyList>) -> PyResult<PyObject> {
         if actions.len() != self.envs.num_envs() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(

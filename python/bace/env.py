@@ -198,6 +198,25 @@ def _formation(n: int) -> dict[str, Any]:
     return {"offset_pos": {"x": 4.0, "y": 0.0, "z": 4.0}}
 
 
+def wez_close_overlay(range_nm: float = 16.0, altitude_ft: float = 25000.0) -> dict[str, Any]:
+    """Head-on spawn at the WEZ close cell (default 16 NM)."""
+    half = float(range_nm) / 2.0
+    pos_b = {"x": 0.0, "y": float(altitude_ft), "z": half}
+    pos_r = {"x": 0.0, "y": float(altitude_ft), "z": -half}
+    return {
+        "blue": {
+            "init_position": pos_b,
+            "init_hdg": 0.0,
+            "target_position": pos_r,
+        },
+        "red": {
+            "init_position": pos_r,
+            "init_hdg": 180.0,
+            "target_position": pos_b,
+        },
+    }
+
+
 def make_env(
     opponent: str = "duck",
     agents: int = 1,
@@ -321,6 +340,10 @@ class BaceVecEnv:
     def reset(self, seed: Optional[int] = None):
         raw = self._native.reset(seed)
         return [_decode_vec_step(r, self._obs_size) for r in raw]
+
+    def reset_at(self, index: int, seed: Optional[int] = None):
+        raw = self._native.reset_at(int(index), seed)
+        return _decode_vec_step(raw, self._obs_size)
 
     def step(self, actions: list[dict[str, np.ndarray | list[float]]]):
         payload = [{a: _action_payload(v) for a, v in d.items()} for d in actions]

@@ -9,7 +9,7 @@ Successor to [B-ACE 1.0](https://github.com/andrekuros/B-ACE) (Godot + TCP/JSON)
 - High-performance **Rust** sim core (`bace-core`) with in-process parallel envs (`bace-vec`)
 - Clean **PettingZoo ParallelEnv** API via PyO3 (`from bace import BaceEnv, make_env`)
 - **Web dashboard** for live parallel runs, episode replay, and WEZ / FSM recipes
-- Three study-case recipes: WEZ validation, FSM search, Tianshou/BenchMARL training
+- Three study-case recipes: WEZ characterization, FSM search, IPPO (shared weights) on NativeVecEnv
 - Vectorized `BaceVecEnv` (`NativeVecEnv`, rayon, `record=false`) and `python -m bace.bench`
 
 Only **blue** can be `external` (learning) in this release. Red uses `baseline1`, `duck`, or `fire_once`.
@@ -43,7 +43,7 @@ Start a live job (4 envs, baseline vs duck), then use Experiment → WEZ or FSM.
 1. Dashboard live: 4 envs, baseline vs duck
 2. `python -m bace.experiment wez`
 3. `python -m bace.experiment fsm` (writes `configs/baselines/{aggressive,balanced,cautious}.json`)
-4. `python -m bace.experiment marl` (Tianshou PPO 1v1; BenchMARL MAPPO/IPPO/MADDPG if `.[benchmarl]`). `--vs duck|fsm --agents 1|2`
+4. `python -m bace.experiment marl_core --profile paper` (IPPO, NativeVecEnv; 1v1 duck/FSM then 2v2 duck; 2v2 FSM gated). `--vs duck|fsm --agents 1|2`
 5. `python -m bace.bench` (throughput vs `n_envs`, PyO3 tax, WEZ/FSM wall-clock)
 
 Tiny CI-sized runs: add `--smoke` (or `--profile smoke`) to wez/fsm/marl.

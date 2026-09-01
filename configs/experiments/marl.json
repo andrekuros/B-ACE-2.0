@@ -2,7 +2,7 @@
   "steps": 200000,
   "opponent": "duck",
   "agents": 1,
-  "algo": "ppo",
+    "algo": "ippo",
   "seed": 0,
   "eval_episodes": 50,
   "n_envs": 8,

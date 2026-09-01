@@ -104,6 +104,23 @@ def test_vec_env_parallel_1v1_duck():
     env.close()
 
 
+def test_ippo_native_vec_2v2():
+    from bace.marl import IppoNativeVec, TrainSpec, _unflatten_discrete
+
+    spec = TrainSpec(agents=2, n_envs=2, steps=8, max_cycles=8, eval_episodes=1)
+    env = IppoNativeVec(spec, n_games=2)
+    assert env.env_num == 4
+    obs, infos = env.reset(seed=1)
+    assert obs.shape[0] == 4
+    acts = np.array([0, 1, 2, 3])
+    o, r, t, tr, inf = env.step(acts)
+    assert o.shape[0] == 4
+    assert r.shape[0] == 4
+    env.close()
+    decoded = _unflatten_discrete(13)
+    assert decoded.shape == (3,)
+
+
 def test_make_env_rl_rewards():
     from bace import make_env
 

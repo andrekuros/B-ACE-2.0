@@ -79,6 +79,10 @@ impl ParallelEnvs {
             .collect()
     }
 
+    pub fn reset_one(&mut self, index: usize, seed: Option<u64>) -> StepResult {
+        self.envs[index].reset(seed)
+    }
+
     pub fn step_all(&mut self, actions: &[HashMap<AgentId, Action>]) -> Vec<StepResult> {
         assert_eq!(actions.len(), self.envs.len());
         // Sequential recording bookkeeping; parallelize physics via rayon on owned chunks if needed.
