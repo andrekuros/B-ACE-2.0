@@ -226,13 +226,16 @@ def make_env(
     red_mission: str = "dca",
     rewards: str = "default",
     action_type: str = "continuous",
+    self_play: bool = False,
     **kwargs: Any,
 ) -> BaceEnv:
-    """PettingZoo factory. Only blue is `external` this release. Caps at 4v4."""
+    """PettingZoo factory. Caps at 4v4. `self_play` makes red `external` too (equal team size)."""
     agents = _clamp_agents(agents)
     form = _formation(agents)
     opp = opponent.lower()
-    if opp == "duck":
+    if self_play:
+        red = {"num_agents": agents, "behavior": "external", **form}
+    elif opp == "duck":
         red: dict[str, Any] = {"num_agents": agents, "behavior": "duck", **form}
     elif opp == "baseline":
         red = {"num_agents": agents, "behavior": "baseline1", **form}

@@ -69,7 +69,7 @@ impl NativeEnv {
     }
 
     fn agent_ids(&self) -> Vec<String> {
-        self.sim.blue_agent_ids.clone()
+        self.sim.agent_ids()
     }
 
     fn is_discrete(&self) -> bool {
@@ -135,7 +135,7 @@ impl NativeVecEnv {
     }
 
     fn agent_ids(&self) -> Vec<String> {
-        self.envs.envs[0].blue_agent_ids.clone()
+        self.envs.envs[0].agent_ids()
     }
 
     fn is_discrete(&self) -> bool {

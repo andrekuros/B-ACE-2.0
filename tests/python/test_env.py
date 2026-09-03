@@ -128,3 +128,63 @@ def test_make_env_rl_rewards():
     assert env._config["env"]["rewards"]["missile_no_fire_factor"] == 0.0
     assert env._config["env"]["rewards"]["detect_loss_factor"] == -0.01
     env.close()
+
+
+def test_self_play_2v2_four_learners():
+    from bace import make_env
+    from bace.marl import IppoNativeVec, TrainSpec
+
+    env = make_env(self_play=True, agents=2, max_cycles=6, seed=1, action_type="discrete")
+    assert set(env.possible_agents) == {"agent_0", "agent_1", "red_0", "red_1"}
+    assert env._obs_size == 41
+    obs, _ = env.reset(seed=1)
+    assert set(obs) == set(env.possible_agents)
+    actions = {a: np.array([0, 2, 2], dtype=np.int64) for a in env.agents}
+    obs, rewards, terms, truncs, _ = env.step(actions)
+    assert set(rewards) == set(env.possible_agents)
+    env.close()
+
+    spec = TrainSpec(agents=2, n_envs=2, steps=8, max_cycles=8, eval_episodes=1, self_play=True)
+    vec = IppoNativeVec(spec, n_games=2)
+    assert vec.env_num == 8
+    o, _ = vec.reset(seed=1)
+    assert o.shape[0] == 8
+    vec.close()
+
+
+def test_self_play_4v4_eight_ids():
+    from bace import make_env
+    from bace.marl import IppoNativeVec, TrainSpec
+
+    env = make_env(self_play=True, agents=4, max_cycles=4, seed=1, action_type="discrete")
+    assert len(env.possible_agents) == 8
+    assert set(env.possible_agents) == {f"agent_{i}" for i in range(4)} | {f"red_{i}" for i in range(4)}
+    env.close()
+
+    spec = TrainSpec(agents=4, n_envs=2, steps=8, max_cycles=8, eval_episodes=1, self_play=True)
+    vec = IppoNativeVec(spec, n_games=2)
+    assert vec.env_num == 16
+    o, _ = vec.reset(seed=1)
+    assert o.shape[0] == 16
+    vec.close()
+    vec_b = IppoNativeVec(spec, n_games=2, blue_only=True)
+    assert vec_b.env_num == 8
+    vec_b.close()
+
+
+def test_sp_mode_sets_self_play():
+    from dataclasses import replace
+
+    from bace.marl import TrainSpec
+
+    mixed = TrainSpec(sp_mode="mixed", agents=2)
+    assert mixed.self_play is True
+    assert mixed.sp_mode == "mixed"
+    pfsp = TrainSpec(sp_mode="pfsp", agents=2)
+    assert pfsp.self_play is True
+    mad = TrainSpec(algo="maddpg", sp_mode="mixed")
+    assert mad.action_type == "continuous"
+    ev = replace(mixed, self_play=False, opponent="duck", sp_mode="")
+    assert ev.self_play is False
+    assert ev.opponent == "duck"
+    assert ev.sp_mode == ""

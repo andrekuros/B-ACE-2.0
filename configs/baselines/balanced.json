@@ -4,7 +4,7 @@
     "seed": 1
   },
   "blue": {
-    "num_agents": 2,
+    "num_agents": 1,
     "behavior": "external",
     "offset_pos": {
       "x": 4.0,
@@ -13,17 +13,17 @@
     }
   },
   "red": {
-    "num_agents": 2,
+    "num_agents": 1,
     "behavior": "baseline1",
     "beh_config": {
       "d_shot": [
-        0.7285508531894536
+        1.04
       ],
       "l_crank": [
-        0.5514411973905746
+        1.06
       ],
       "l_break": [
-        1.5835895306859866
+        1.05
       ]
     },
     "offset_pos": {

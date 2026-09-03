@@ -1,5 +1,5 @@
 {
-  "steps": 100000,
+  "steps": 200000,
   "eval_episodes": 50,
   "max_cycles": 200,
   "algo": "ippo",
@@ -10,6 +10,7 @@
   "share_tracks": true,
   "red_mission": "dca",
   "ppo_1v1_steps": 200000,
+  "ppo_2v2_steps": 200000,
   "n_envs": 8,
   "algorithm": "IPPO (shared weights)"
 }

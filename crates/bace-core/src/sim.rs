@@ -110,6 +110,7 @@ pub struct Simulation {
     pub fighters: Vec<Fighter>,
     pub missiles: Vec<Missile>,
     pub blue_agent_ids: Vec<AgentId>,
+    pub red_agent_ids: Vec<AgentId>,
     pub action_step: u32,
     pub physics_step: u32,
     pub end: EndCondition,
@@ -144,6 +145,7 @@ impl Simulation {
             fighters: Vec::new(),
             missiles: Vec::new(),
             blue_agent_ids: Vec::new(),
+            red_agent_ids: Vec::new(),
             action_step: 0,
             physics_step: 0,
             end: EndCondition::Ongoing,
@@ -206,6 +208,7 @@ impl Simulation {
         self.fighters.clear();
         self.missiles.clear();
         self.blue_agent_ids.clear();
+        self.red_agent_ids.clear();
         self.next_missile_id = 1;
 
         let n_blue = self.config.blue.num_agents;
@@ -253,8 +256,21 @@ impl Simulation {
                 &blue_ids,
                 allies,
             );
+            self.red_agent_ids.push(format!("red_{i}"));
             self.fighters.push(f);
         }
+    }
+
+    pub fn red_is_external(&self) -> bool {
+        self.config.red.behavior == crate::config::Behavior::External
+    }
+
+    pub fn agent_ids(&self) -> Vec<AgentId> {
+        let mut ids = self.blue_agent_ids.clone();
+        if self.red_is_external() {
+            ids.extend(self.red_agent_ids.iter().cloned());
+        }
+        ids
     }
 
     pub fn reset(&mut self, seed: Option<u64>) -> StepResult {
@@ -593,30 +609,46 @@ impl Simulation {
         }
     }
 
-    fn sense_and_observe(&mut self, _is_reset: bool) -> StepResult {
-        self.sense_all();
-
-        // Mission shaping for blue
-        for f in self.fighters.iter_mut().filter(|f| f.team == 0 && f.alive) {
-            let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
-            f.rewards.add_mission(shaped);
+    fn mission_shape_learners(&mut self) {
+        let red_ext = self.red_is_external();
+        for f in self.fighters.iter_mut().filter(|f| f.alive) {
+            if f.team == 0 || (f.team == 1 && red_ext) {
+                let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
+                f.rewards.add_mission(shaped);
+            }
         }
+    }
 
+    fn collect_learner_steps(&mut self, take_reward: bool) -> HashMap<AgentId, AgentStep> {
         let views = self.views();
-        let mut agents = HashMap::new();
-        let blue: Vec<&Fighter> = self.fighters.iter().filter(|f| f.team == 0).collect();
-        for (i, f) in blue.iter().enumerate() {
-            let name = self
-                .blue_agent_ids
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("agent_{i}"));
+        let end = self.end;
+        let mut names: Vec<(AgentId, u8, usize)> = self
+            .blue_agent_ids
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), 0u8, i))
+            .collect();
+        if self.red_is_external() {
+            names.extend(
+                self.red_agent_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), 1u8, i)),
+            );
+        }
+        let mut pending = Vec::new();
+        for (name, team, idx) in names {
+            let f = self
+                .fighters
+                .iter()
+                .filter(|f| f.team == team)
+                .nth(idx)
+                .expect("learner index");
             let allies: Vec<AircraftView> = views
                 .iter()
                 .copied()
                 .filter(|v| f.ally_ids.contains(&v.id))
                 .collect();
-            // Also pass enemy dist2go via views of enemies
             let enemies: Vec<AircraftView> = views
                 .iter()
                 .copied()
@@ -629,20 +661,42 @@ impl Simulation {
                 }
             }
             let flat = obs.to_flat();
-            // rewards taken later in step; on reset zero
+            let terminated = f.done && end != EndCondition::MaxCycles;
+            let truncated = end == EndCondition::MaxCycles;
+            pending.push((name, team, idx, obs, flat, terminated, truncated));
+        }
+        let mut agents = HashMap::new();
+        for (name, team, idx, obs, flat, terminated, truncated) in pending {
+            let (reward, breakdown) = if take_reward {
+                let fmut = self
+                    .fighters
+                    .iter_mut()
+                    .filter(|f| f.team == team)
+                    .nth(idx)
+                    .expect("learner index");
+                fmut.rewards.take_step()
+            } else {
+                (0.0, RewardBreakdown::default())
+            };
             agents.insert(
                 name,
                 AgentStep {
                     obs,
                     flat_obs: flat,
-                    reward: 0.0,
-                    reward_breakdown: RewardBreakdown::default(),
-                    terminated: f.done && self.end != EndCondition::MaxCycles,
-                    truncated: self.end == EndCondition::MaxCycles,
+                    reward,
+                    reward_breakdown: breakdown,
+                    terminated,
+                    truncated,
                 },
             );
         }
+        agents
+    }
 
+    fn sense_and_observe(&mut self, _is_reset: bool) -> StepResult {
+        self.sense_all();
+        self.mission_shape_learners();
+        let agents = self.collect_learner_steps(false);
         StepResult {
             agents,
             end: self.end,
@@ -660,6 +714,8 @@ impl Simulation {
 
         // Apply actions / behaviors
         let blue_ids = self.blue_agent_ids.clone();
+        let red_ids = self.red_agent_ids.clone();
+        let red_ext = self.red_is_external();
         for (i, name) in blue_ids.iter().enumerate() {
             if let Some(f) = self.fighters.iter_mut().filter(|f| f.team == 0).nth(i) {
                 if f.behavior == crate::config::Behavior::External {
@@ -671,8 +727,14 @@ impl Simulation {
                 }
             }
         }
-        for f in self.fighters.iter_mut().filter(|f| f.team == 1) {
-            f.run_behavior();
+        for (i, f) in self.fighters.iter_mut().filter(|f| f.team == 1).enumerate() {
+            if red_ext {
+                if let Some(a) = red_ids.get(i).and_then(|n| actions.get(n)) {
+                    f.apply_action(*a);
+                }
+            } else {
+                f.run_behavior();
+            }
         }
 
         self.accumulate_behavior_stats();
@@ -699,50 +761,8 @@ impl Simulation {
 
         // Collect rewards into step result
         self.sense_all();
-        for f in self.fighters.iter_mut().filter(|f| f.team == 0 && f.alive) {
-            let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
-            f.rewards.add_mission(shaped);
-        }
-
-        let views = self.views();
-        let mut agents = HashMap::new();
-        let n_blue = self.fighters.iter().filter(|f| f.team == 0).count();
-        for i in 0..n_blue {
-            let name = self.blue_agent_ids[i].clone();
-            let f = self.fighters.iter_mut().filter(|f| f.team == 0).nth(i).unwrap();
-            let allies: Vec<AircraftView> = views
-                .iter()
-                .copied()
-                .filter(|v| f.ally_ids.contains(&v.id))
-                .collect();
-            let enemies: Vec<AircraftView> = views
-                .iter()
-                .copied()
-                .filter(|v| f.enemy_tracks.iter().any(|t| t.id == v.id))
-                .collect();
-            let mut obs = f.build_obs(&allies);
-            for e in &mut obs.enemies {
-                if let Some(ev) = enemies.iter().find(|x| x.id == e.id) {
-                    e.dist_target = ev.dist2go / 3000.0;
-                }
-            }
-            let flat = obs.to_flat();
-            let (reward, breakdown) = f.rewards.take_step();
-            let terminated = f.done && self.end != EndCondition::MaxCycles;
-            let truncated = self.end == EndCondition::MaxCycles;
-            agents.insert(
-                name,
-                AgentStep {
-                    obs,
-                    flat_obs: flat,
-                    reward,
-                    reward_breakdown: breakdown,
-                    terminated,
-                    truncated,
-                },
-            );
-        }
-
+        self.mission_shape_learners();
+        let agents = self.collect_learner_steps(true);
         StepResult {
             agents,
             end: self.end,
@@ -756,12 +776,18 @@ impl Simulation {
             end: self.end,
             fighters: {
                 let mut blue_i = 0usize;
+                let mut red_i = 0usize;
+                let red_ext = self.red_is_external();
                 self.fighters
                     .iter()
                     .map(|f| {
                         let agent_name = if f.team == 0 {
                             let name = self.blue_agent_ids.get(blue_i).cloned();
                             blue_i += 1;
+                            name
+                        } else if red_ext {
+                            let name = self.red_agent_ids.get(red_i).cloned();
+                            red_i += 1;
                             name
                         } else {
                             None
@@ -865,6 +891,7 @@ impl Simulation {
 mod tests {
     use super::*;
     use crate::config::{Behavior, ScenarioConfig};
+    use crate::obs::Action;
 
     #[test]
     fn reset_and_step_runs() {
@@ -964,5 +991,31 @@ mod tests {
         assert!(ended || sim.action_step >= 30);
         assert_eq!(sim.blue_agent_ids.len(), 4);
         assert_eq!(sim.obs_size(), 9 + 13 * 4 + 6 * 3);
+    }
+
+    #[test]
+    fn self_play_2v2_exposes_red_learners() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 8;
+        cfg.blue.num_agents = 2;
+        cfg.red.num_agents = 2;
+        cfg.blue.behavior = Behavior::External;
+        cfg.red.behavior = Behavior::External;
+        cfg.blue.apply_box_formation();
+        cfg.red.apply_box_formation();
+        let mut sim = Simulation::new(cfg);
+        let r = sim.reset(Some(3));
+        assert_eq!(sim.agent_ids().len(), 4);
+        assert!(r.agents.contains_key("agent_0"));
+        assert!(r.agents.contains_key("red_1"));
+        assert_eq!(r.agents["agent_0"].flat_obs.len(), sim.obs_size());
+        assert_eq!(r.agents["red_0"].flat_obs.len(), sim.obs_size());
+        let mut acts = HashMap::new();
+        for n in sim.agent_ids() {
+            acts.insert(n, Action::default());
+        }
+        let s = sim.step(&acts);
+        assert_eq!(s.agents.len(), 4);
+        assert!(s.agents["red_0"].flat_obs.len() == sim.obs_size());
     }
 }

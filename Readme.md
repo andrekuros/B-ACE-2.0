@@ -43,7 +43,7 @@ Start a live job (4 envs, baseline vs duck), then use Experiment → WEZ or FSM.
 1. Dashboard live: 4 envs, baseline vs duck
 2. `python -m bace.experiment wez`
 3. `python -m bace.experiment fsm` (writes `configs/baselines/{aggressive,balanced,cautious}.json`)
-4. `python -m bace.experiment marl_core --profile paper` (IPPO, NativeVecEnv; 1v1 duck/FSM then 2v2 duck; 2v2 FSM gated). `--vs duck|fsm --agents 1|2`
+4. `python -m bace.experiment marl_core --profile paper` (IPPO vs duck/FSM). `python -m bace.experiment marl_selfplay --profile paper` (2v2 shared-policy self-play).
 5. `python -m bace.bench` (throughput vs `n_envs`, PyO3 tax, WEZ/FSM wall-clock)
 
 Tiny CI-sized runs: add `--smoke` (or `--profile smoke`) to wez/fsm/marl.

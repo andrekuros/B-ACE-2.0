@@ -553,6 +553,19 @@ def run_marl_ablations(
     return report
 
 
+def run_marl_selfplay(
+    profile: str = "smoke",
+    out_dir: Optional[Path] = None,
+) -> dict[str, Any]:
+    from bace.marl import run_selfplay
+
+    dest = out_dir or Path("runs/experiments")
+    report = run_selfplay(profile=profile, out_dir=dest)
+    path = write_artifact(dest, "marl_selfplay", report)
+    report["_artifact"] = str(path)
+    return report
+
+
 def make_benchmarl_env(**kwargs: Any):
     """BenchMARL-oriented factory: returns a PettingZoo ParallelEnv."""
     return make_env(**kwargs)
@@ -562,7 +575,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     p = argparse.ArgumentParser(prog="bace.experiment")
     p.add_argument(
         "recipe",
-        choices=["wez", "fsm", "marl", "marl_core", "marl_striker", "marl_tracks", "bench"],
+        choices=["wez", "fsm", "marl", "marl_core", "marl_selfplay", "marl_striker", "marl_tracks", "bench"],
     )
     p.add_argument("--out", type=Path, default=Path("runs/experiments"))
     p.add_argument("--max-parallel", type=int, default=8)
@@ -598,6 +611,10 @@ def main(argv: Optional[list[str]] = None) -> None:
     elif args.recipe == "marl_core":
         report = run_marl_core(profile=profile if profile != "default" else "paper", out_dir=args.out)
         print(f"marl_core jobs={report.get('n_jobs')} profile={report.get('profile')}")
+        print("wrote", report.get("_artifact"))
+    elif args.recipe == "marl_selfplay":
+        report = run_marl_selfplay(profile=profile if profile != "default" else "paper", out_dir=args.out)
+        print(f"marl_selfplay jobs={report.get('n_jobs')} profile={report.get('profile')}")
         print("wrote", report.get("_artifact"))
     elif args.recipe in {"marl_striker", "marl_tracks"}:
         kind = "striker" if args.recipe == "marl_striker" else "tracks"

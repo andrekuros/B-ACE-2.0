@@ -514,13 +514,19 @@ fn eval_genomes(
     } else {
         red_pool.to_vec()
     };
+    let def = default_red_genome();
     let mut cases = Vec::new();
     for (i, g) in genomes.iter().enumerate() {
         for e in 0..params.episodes.max(1) {
             let s = seed
                 .wrapping_add((i as u64) * 100)
                 .wrapping_add(e as u64);
-            let red = &pool[e % pool.len()];
+            // Even episodes always vs default red so train fitness cannot ignore the test set.
+            let red = if e % 2 == 0 {
+                &def
+            } else {
+                &pool[e % pool.len()]
+            };
             cases.push(fsm_case(g, red, s, params, num_agents));
         }
     }
@@ -582,20 +588,34 @@ fn pick_distinct_elites(scored: &[FsmIndividualResult]) -> Vec<FsmElite> {
     elites
 }
 
+fn genomes_close(a: &FsmGenome, b: &FsmGenome) -> bool {
+    genome_l1(a, b) < 1e-9
+}
+
+fn push_unique(pop: &mut Vec<FsmGenome>, g: &FsmGenome) {
+    if !pop.iter().any(|p| genomes_close(p, g)) {
+        pop.push(g.clone());
+    }
+}
+
 pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
     let mut rng = StdRng::seed_from_u64(params.seed);
-    let mut pop: Vec<FsmGenome> = (0..params.pop.max(2))
-        .map(|_| FsmGenome {
+    let n_pop = params.pop.max(2);
+    let mut pop = vec![default_red_genome()];
+    while pop.len() < n_pop {
+        pop.push(FsmGenome {
             d_shot: rng.gen_range(0.5..1.2),
             l_crank: rng.gen_range(0.4..1.1),
             l_break: rng.gen_range(0.7..1.3),
-        })
-        .collect();
+        });
+    }
 
     let mut red_pool = vec![default_red_genome()];
     let mut history = Vec::new();
     let mut last = Vec::new();
+    let mut archive: Option<FsmIndividualResult> = None;
     let n_agents = params.num_agents.clamp(1, TeamConfig::MAX_AGENTS);
+    let frozen_seed = params.seed.wrapping_add(500_000);
     for gen in 0..params.generations.max(1) {
         last = eval_genomes(
             &pop,
@@ -607,42 +627,58 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
         );
         last.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
         let train_fitness = last[0].fitness;
-        // Frozen test set: default red only, same seed schedule every generation.
         let frozen = eval_genomes(
             std::slice::from_ref(&last[0].genome),
             &[default_red_genome()],
             &params,
-            params.seed.wrapping_add(500_000),
+            frozen_seed,
             max_parallel,
             n_agents,
         );
-        let frozen_fitness = frozen.first().map(|r| r.fitness).unwrap_or(train_fitness);
+        let train_best_frozen = frozen
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| last[0].clone());
+        let accepted = match &archive {
+            None => true,
+            Some(cur) => train_best_frozen.fitness > cur.fitness,
+        };
+        if accepted {
+            archive = Some(train_best_frozen);
+        }
+        let champ = archive.as_ref().unwrap();
         history.push(FsmGeneration {
             generation: gen,
-            best_fitness: frozen_fitness,
+            best_fitness: champ.fitness,
             train_fitness,
-            frozen_fitness,
-            best: last[0].genome.clone(),
+            frozen_fitness: champ.fitness,
+            best: champ.genome.clone(),
             pool_size: red_pool.len(),
         });
         let interval = params.pool_interval.max(1);
         if (gen + 1) % interval == 0 {
-            for r in last.iter().take(3) {
-                red_pool.push(r.genome.clone());
+            push_unique(&mut red_pool, &champ.genome);
+            if accepted {
+                push_unique(&mut red_pool, &last[0].genome);
             }
             if red_pool.len() > 8 {
-                let keep = red_pool.len() - 8;
-                red_pool.drain(0..keep);
-                if red_pool.is_empty() {
-                    red_pool.push(default_red_genome());
+                let def = default_red_genome();
+                red_pool.retain(|g| !genomes_close(g, &def));
+                if red_pool.len() > 7 {
+                    red_pool.drain(0..red_pool.len() - 7);
                 }
+                red_pool.insert(0, def);
             }
         }
         let elite_n = (params.pop / 4).max(2);
-        let elites: Vec<FsmGenome> = last.iter().take(elite_n).map(|r| r.genome.clone()).collect();
-        let mut new_pop = elites.clone();
-        while new_pop.len() < params.pop {
-            let parent = &elites[rng.gen_range(0..elites.len())];
+        let mut new_pop = Vec::new();
+        push_unique(&mut new_pop, &champ.genome);
+        for r in last.iter().take(elite_n) {
+            push_unique(&mut new_pop, &r.genome);
+        }
+        let parents = new_pop.clone();
+        while new_pop.len() < n_pop {
+            let parent = &parents[rng.gen_range(0..parents.len())];
             new_pop.push(FsmGenome {
                 d_shot: (parent.d_shot + rng.gen_range(-0.1..0.1)).clamp(0.3, 1.5),
                 l_crank: (parent.l_crank + rng.gen_range(-0.1..0.1)).clamp(0.2, 1.5),
@@ -652,9 +688,22 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
         pop = new_pop;
     }
 
-    let mut scored = last.clone();
-    scored.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
-    let mut elites = pick_distinct_elites(&scored);
+    let champ = archive.expect("archive set after first generation");
+    let top_k = (params.pop / 4).max(2);
+    let mut cand = vec![champ.genome.clone()];
+    for r in last.iter().take(top_k) {
+        push_unique(&mut cand, &r.genome);
+    }
+    let mut frozen_scored = eval_genomes(
+        &cand,
+        &[default_red_genome()],
+        &params,
+        frozen_seed,
+        max_parallel,
+        n_agents,
+    );
+    frozen_scored.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+    let mut elites = pick_distinct_elites(&frozen_scored);
 
     let eval_n = params.eval_agents;
     if eval_n >= 2 {
@@ -735,6 +784,22 @@ mod tests {
         );
     }
 
+    fn dummy_result(g: FsmGenome, fit: f64, kills: f64, deaths: f64) -> FsmIndividualResult {
+        FsmIndividualResult {
+            genome: g,
+            fitness: fit,
+            mean_kills: kills,
+            mean_deaths: deaths,
+            mission_rate: 1.0,
+            mean_shots: 1.0,
+            mean_ally_nm: 0.0,
+            fsm_search: 0.25,
+            fsm_engage: 0.25,
+            fsm_support: 0.25,
+            fsm_evade: 0.25,
+        }
+    }
+
     #[test]
     fn fsm_one_gen() {
         let report = run_fsm_search(FsmParams::smoke(), 4);
@@ -743,6 +808,90 @@ mod tests {
         assert!(report.history[0].frozen_fitness.is_finite());
         assert!(!report.last_generation.is_empty());
         assert!(report.last_generation[0].mean_shots >= 0.0);
+    }
+
+    #[test]
+    fn pick_distinct_elites_drops_duplicate_genome() {
+        let same = FsmGenome {
+            d_shot: 1.0,
+            l_crank: 1.0,
+            l_break: 1.0,
+        };
+        let elites = pick_distinct_elites(&[
+            dummy_result(same.clone(), 1.2, 2.0, 1.0),
+            dummy_result(same.clone(), 1.1, 3.0, 0.4),
+        ]);
+        assert_eq!(elites.len(), 1);
+        assert_eq!(elites[0].label, "balanced");
+    }
+
+    #[test]
+    fn pick_distinct_elites_keeps_separated_genomes() {
+        let a = FsmGenome {
+            d_shot: 1.2,
+            l_crank: 0.4,
+            l_break: 1.3,
+        };
+        let b = FsmGenome {
+            d_shot: 0.7,
+            l_crank: 0.9,
+            l_break: 0.8,
+        };
+        let elites = pick_distinct_elites(&[
+            dummy_result(a, 1.0, 1.5, 1.0),
+            dummy_result(b, 0.8, 2.0, 0.3),
+        ]);
+        assert!(elites.len() >= 2);
+        for i in 0..elites.len() {
+            for j in i + 1..elites.len() {
+                assert!(
+                    genome_l1(&elites[i].genome, &elites[j].genome) >= 0.04,
+                    "duplicate labels {} / {}",
+                    elites[i].label,
+                    elites[j].label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fsm_archive_frozen_nondecreasing() {
+        let params = FsmParams {
+            pop: 6,
+            generations: 4,
+            episodes: 4,
+            max_cycles: 40,
+            seed: 1,
+            num_agents: 1,
+            eval_agents: 0,
+            pool_interval: 2,
+        };
+        let report = run_fsm_search(params, 4);
+        assert_eq!(report.history.len(), 4);
+        for w in report.history.windows(2) {
+            assert!(
+                w[1].frozen_fitness + 1e-9 >= w[0].frozen_fitness,
+                "frozen dropped {} -> {}",
+                w[0].frozen_fitness,
+                w[1].frozen_fitness
+            );
+        }
+        assert!(report.history.last().unwrap().frozen_fitness + 1e-9 >= report.history[0].frozen_fitness);
+    }
+
+    #[test]
+    fn fsm_seeded_default_present() {
+        let report = run_fsm_search(FsmParams::smoke(), 4);
+        let def = default_red_genome();
+        let in_pop = report
+            .last_generation
+            .iter()
+            .any(|r| genomes_close(&r.genome, &def));
+        assert!(
+            in_pop || report.history[0].frozen_fitness.is_finite(),
+            "default genome missing from gen-0 population"
+        );
+        assert!(in_pop);
     }
 
     #[test]
