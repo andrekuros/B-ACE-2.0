@@ -63,7 +63,7 @@ Behaviors: `external` (RL), `baseline1` (FSM), `duck`.
 | `crates/bace-server` | Axum HTTP/WS dashboard API |
 | `python/bace` | PettingZoo wrapper |
 | `web/dist` | Live + replay UI |
-| `examples/` | Tianshou toy trainer, BenchMARL hook, experiment, GA |
+| `examples/` | Tianshou toy trainer, BenchMARL hook, experiment, GA, OpenJev tactic head |
 
 ## Examples
 
@@ -72,6 +72,7 @@ python examples/tianshou/train_ddpg_toy.py --steps 200
 python examples/benchmarl/run_pettingzoo_smoke.py
 python examples/experiment/run_experiment.py --cases 8
 python examples/ga/optimize_fsm.py --generations 3 --pop 6
+python examples/openjev/eval.py --backend auto --seeds 16
 ```
 
 ## Related
