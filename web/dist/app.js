@@ -14,8 +14,6 @@ const state = {
   playing: false,
   envIndex: 0,
   snapshots: [],
-  exp: null,
-  expSort: { key: "seed", dir: 1 },
 };
 
 function $(id) {
@@ -232,6 +230,7 @@ $("start-job").onclick = async () => {
     method: "POST",
     body: JSON.stringify({
       num_envs: Number($("num-envs").value),
+      num_agents: Number($("num-agents").value),
       max_cycles: Number($("max-cycles").value),
       record: true,
       blue_behavior: "baseline1",
@@ -299,107 +298,59 @@ setInterval(() => {
   renderReplay();
 }, 200);
 
-const END_COLOR = {
-  RedKilled: "#3ecf8e",
-  BlueKilled: "#ff6b5a",
-  MutualKill: "#c4b5fd",
-  MaxCycles: "#ffd166",
-  RedMission: "#4aa3ff",
-};
-
-function renderExperiment(out) {
-  state.exp = out;
-  const n = out.cases || 0;
-  const cards = [
-    ["cases", n],
-    ["win rate", `${((out.win_rate || 0) * 100).toFixed(0)}%`],
-    ["red killed", out.red_killed ?? 0],
-    ["blue killed", out.blue_killed ?? 0],
-    ["mutual", out.mutual_kill ?? 0],
-    ["timeout", out.timeouts ?? 0],
-    ["mean steps", (out.mean_steps || 0).toFixed(0)],
-  ];
-  $("exp-summary").innerHTML = cards
-    .map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`)
-    .join("");
-
-  const counts = {
-    red_killed: out.red_killed || 0,
-    blue_killed: out.blue_killed || 0,
-    mutual_kill: out.mutual_kill || 0,
-      max_cycles: out.timeouts || 0,
-  };
-  $("exp-bars").innerHTML = Object.entries(counts)
-    .map(([k, v]) => {
-      const pct = n ? (100 * v) / n : 0;
-      return `<div class="bar-row"><span>${k}</span><div class="bar-track"><div class="bar-fill ${k}" style="width:${pct}%"></div></div><span>${v}</span></div>`;
-    })
-    .join("");
-
-  const rows = out.results || [];
-  const xs = rows.map((r) => Number(r.d_shot) || 0);
-  const ys = rows.map((r) => Number(r.steps) || 0);
-  const minX = Math.min(...xs, 0.7);
-  const maxX = Math.max(...xs, 0.85);
-  const minY = 0;
-  const maxY = Math.max(...ys, 1);
-  const svg = $("exp-scatter");
-  const dots = rows
-    .map((r) => {
-      const x = 24 + ((Number(r.d_shot) - minX) / (maxX - minX || 1)) * 280;
-      const y = 160 - ((Number(r.steps) - minY) / (maxY - minY || 1)) * 140;
-      const c = END_COLOR[r.end] || "#8aa0b5";
-      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${c}" opacity="0.9"><title>seed ${r.seed} d_shot=${r.d_shot} ${r.end}</title></circle>`;
-    })
-    .join("");
-  svg.innerHTML = `
-    <rect x="0" y="0" width="320" height="180" fill="transparent"/>
-    <text x="12" y="16" fill="#8aa0b5" font-size="10" font-family="IBM Plex Mono">steps</text>
-    <text x="250" y="174" fill="#8aa0b5" font-size="10" font-family="IBM Plex Mono">d_shot</text>
-    ${dots}
-  `;
-  renderExpTable();
+function fillExpTable(recipe, out) {
+  const thead = $("exp-table").querySelector("thead");
+  const tbody = $("exp-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  if (recipe === "wez") {
+    thead.innerHTML = "<tr><th>range</th><th>alt</th><th>aspect</th><th>n</th><th>hits</th><th>hit rate</th><th>RMax</th></tr>";
+    (out.cells || []).forEach((c) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${c.range_nm}</td><td>${c.altitude_ft}</td><td>${c.aspect}</td><td>${c.n}</td><td>${c.hits}</td><td>${(c.hit_rate || 0).toFixed(2)}</td><td>${(c.analytic_rmax_nm || 0).toFixed(1)}</td>`;
+      tbody.appendChild(tr);
+    });
+  } else {
+    thead.innerHTML = "<tr><th>d_shot</th><th>l_crank</th><th>l_break</th><th>fitness</th><th>kills</th><th>deaths</th><th>mission</th></tr>";
+    (out.last_generation || []).forEach((r) => {
+      const g = r.genome || {};
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${(g.d_shot || 0).toFixed(3)}</td><td>${(g.l_crank || 0).toFixed(3)}</td><td>${(g.l_break || 0).toFixed(3)}</td><td>${(r.fitness || 0).toFixed(3)}</td><td>${(r.mean_kills || 0).toFixed(2)}</td><td>${(r.mean_deaths || 0).toFixed(2)}</td><td>${(r.mission_rate || 0).toFixed(2)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
 }
-
-function renderExpTable() {
-  const rows = [...(state.exp?.results || [])];
-  const { key, dir } = state.expSort;
-  rows.sort((a, b) => {
-    const va = a[key];
-    const vb = b[key];
-    if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
-    return String(va).localeCompare(String(vb)) * dir;
-  });
-  const tb = $("exp-table").querySelector("tbody");
-  tb.innerHTML = rows
-    .map(
-      (r) =>
-        `<tr><td>${r.seed}</td><td>${Number(r.d_shot).toFixed(2)}</td><td>${r.end}</td><td>${r.steps}</td><td>${r.blue_alive}</td><td>${r.red_alive}</td></tr>`
-    )
-    .join("");
-}
-
-$("exp-table").querySelectorAll("th").forEach((th) => {
-  th.addEventListener("click", () => {
-    const key = th.dataset.sort;
-    if (state.expSort.key === key) state.expSort.dir *= -1;
-    else state.expSort = { key, dir: 1 };
-    renderExpTable();
-  });
-});
 
 $("run-exp").onclick = async () => {
-  $("exp-summary").innerHTML = `<div class="card"><div class="k">status</div><div class="v">running…</div></div>`;
+  $("exp-out").textContent = "running…";
+  $("exp-summary").textContent = "";
+  const recipe = $("exp-recipe").value;
+  const body = {
+    recipe,
+    max_cycles: Number($("exp-cycles").value),
+  };
+  if (recipe === "fsm") {
+    body.pop = Number($("exp-cases").value);
+    body.generations = Number($("exp-gens").value);
+  } else {
+    body.repeats = Number($("exp-cases").value);
+  }
   const out = await api("/experiment", {
     method: "POST",
-    body: JSON.stringify({
-      cases: Number($("exp-cases").value),
-      max_cycles: Number($("exp-cycles").value),
-      blue_behavior: $("exp-blue").value,
-      red_behavior: $("exp-red").value,
-    }),
+    body: JSON.stringify(body),
   });
-  renderExperiment(out);
+  $("exp-summary").textContent = out.summary || "";
+  fillExpTable(recipe, out);
+  $("exp-out").textContent = JSON.stringify(
+    { recipe: out.recipe, summary: out.summary, params: out.params, elites: out.elites },
+    null,
+    2
+  );
+};
+
+$("exp-recipe").onchange = () => {
+  const fsm = $("exp-recipe").value === "fsm";
+  $("exp-gen-row").classList.toggle("hidden", !fsm);
+  $("exp-cases-label").childNodes[0].textContent = fsm ? "Pop " : "Repeats / pop ";
 };
 
 applyViewConfig(loadCfg());

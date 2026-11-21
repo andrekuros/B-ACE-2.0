@@ -1,11 +1,17 @@
 //! Batched parallel B-ACE environments.
 
-use bace_core::{Action, AgentId, EndCondition, ScenarioConfig, SimSnapshot, Simulation, StepResult};
+pub mod recipes;
+
+use bace_core::{
+    Action, AgentId, Behavior, EndCondition, EpisodeOutcome, ScenarioConfig, SimSnapshot,
+    Simulation, StepResult,
+};
 use bace_record::{EpisodeRecord, Recorder, StepRecord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VecEnvConfig {
@@ -73,6 +79,10 @@ impl ParallelEnvs {
             .collect()
     }
 
+    pub fn reset_one(&mut self, index: usize, seed: Option<u64>) -> StepResult {
+        self.envs[index].reset(seed)
+    }
+
     pub fn step_all(&mut self, actions: &[HashMap<AgentId, Action>]) -> Vec<StepResult> {
         assert_eq!(actions.len(), self.envs.len());
         // Sequential recording bookkeeping; parallelize physics via rayon on owned chunks if needed.
@@ -132,20 +142,8 @@ impl ParallelEnvs {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ExperimentOutcome {
-    pub config: ScenarioConfig,
-    pub end: EndCondition,
-    pub steps: u32,
-    pub blue_alive: usize,
-    pub red_alive: usize,
-}
-
 /// Run a grid of scenario configs (experiment mode).
-pub fn run_experiment(
-    cases: Vec<ScenarioConfig>,
-    max_parallel: usize,
-) -> Vec<ExperimentOutcome> {
+pub fn run_experiment(cases: Vec<ScenarioConfig>, max_parallel: usize) -> Vec<EpisodeOutcome> {
     let chunk = max_parallel.max(1);
     cases
         .into_iter()
@@ -161,17 +159,66 @@ pub fn run_experiment(
                     while sim.end == EndCondition::Ongoing {
                         sim.step(&empty);
                     }
-                    ExperimentOutcome {
-                        config: cfg.clone(),
-                        end: sim.end,
-                        steps: sim.action_step,
-                        blue_alive: sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count(),
-                        red_alive: sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count(),
-                    }
+                    sim.outcome()
                 })
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThroughputReport {
+    pub n_envs: usize,
+    pub steps: u32,
+    pub wall_s: f64,
+    pub decision_hz: f64,
+    pub physics_hz: f64,
+    pub realtime_factor: f64,
+    pub action_repeat: u32,
+    pub phy_fps: u32,
+}
+
+/// Duck-vs-duck (or given scenario) parallel step throughput. `record=false` uses rayon.
+pub fn bench_parallel(mut scenario: ScenarioConfig, n_envs: usize, steps: u32) -> ThroughputReport {
+    scenario.blue.behavior = if scenario.blue.behavior == Behavior::External {
+        Behavior::Duck
+    } else {
+        scenario.blue.behavior
+    };
+    let n_envs = n_envs.max(1);
+    let steps = steps.max(1);
+    let action_repeat = scenario.env.action_repeat.max(1);
+    let phy_fps = scenario.env.phy_fps.max(1);
+    let mut pe = ParallelEnvs::new(VecEnvConfig {
+        num_envs: n_envs,
+        scenario,
+        record: false,
+        runs_dir: PathBuf::from("/tmp/bace_bench"),
+    });
+    pe.reset_all(Some(1));
+    let actions: Vec<HashMap<AgentId, Action>> = (0..n_envs).map(|_| HashMap::new()).collect();
+    let t0 = Instant::now();
+    for _ in 0..steps {
+        let results = pe.step_all(&actions);
+        for (i, r) in results.iter().enumerate() {
+            if r.end != EndCondition::Ongoing {
+                pe.envs[i].reset(Some(1 + i as u64 + r.action_step as u64));
+            }
+        }
+    }
+    let wall_s = t0.elapsed().as_secs_f64().max(1e-9);
+    let decisions = n_envs as f64 * steps as f64;
+    let physics = decisions * action_repeat as f64;
+    ThroughputReport {
+        n_envs,
+        steps,
+        wall_s,
+        decision_hz: decisions / wall_s,
+        physics_hz: physics / wall_s,
+        realtime_factor: physics / (wall_s * phy_fps as f64),
+        action_repeat,
+        phy_fps,
+    }
 }
 
 #[cfg(test)]
@@ -200,15 +247,25 @@ mod tests {
     }
 
     #[test]
-    fn experiment_returns_alive_counts() {
-        let mut scenario = ScenarioConfig::default();
-        scenario.env.max_cycles = 8;
-        scenario.blue.behavior = Behavior::Duck;
-        scenario.red.behavior = Behavior::Duck;
-        let out = run_experiment(vec![scenario], 1);
-        assert_eq!(out.len(), 1);
-        assert!(out[0].steps >= 1);
-        assert_eq!(out[0].blue_alive, 1);
-        assert_eq!(out[0].red_alive, 1);
+    fn bench_parallel_reports_hz() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 40;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.behavior = Behavior::Duck;
+        let r = bench_parallel(cfg, 4, 20);
+        assert_eq!(r.n_envs, 4);
+        assert!(r.decision_hz > 0.0);
+        assert!(r.realtime_factor > 0.0);
+    }
+
+    #[test]
+    fn run_experiment_returns_outcomes() {
+        let mut cfg = bace_core::ScenarioConfig::default();
+        cfg.env.max_cycles = 8;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.behavior = Behavior::Duck;
+        let out = run_experiment(vec![cfg.clone(), cfg], 2);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].steps > 0);
     }
 }

@@ -18,11 +18,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "pytest-timeout>=2.2"]
-train = ["tianshou>=1.1", "torch>=2.0"]
+train = ["tianshou>=2.0", "torch>=2.0"]
 benchmarl = ["benchmarl>=1.3", "torchrl>=0.4"]
 
 [project.scripts]
 bace-random = "bace.examples.random_policy:main"
+bace-experiment = "bace.experiment:main"
 
 [tool.maturin]
 manifest-path = "crates/bace-py/Cargo.toml"

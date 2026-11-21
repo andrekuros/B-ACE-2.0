@@ -232,6 +232,7 @@ version = "2.0.0"
 dependencies = [
  "bace-core",
  "bace-record",
+ "rand",
  "rayon",
  "serde",
  "serde_json",

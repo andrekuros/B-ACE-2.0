@@ -19,7 +19,6 @@ pub use config::{
 pub use obs::{Action, AllyObs, DiscreteAction, EnemyObs, OwnObs, StructuredObs};
 pub use rewards::RewardBreakdown;
 pub use sim::{
-    AgentId, EndCondition, FighterSnapshot, MissileSnapshot, SimSnapshot, Simulation, StepResult,
-    Team, TrackSnapshot,
+    AgentId, EndCondition, EpisodeOutcome, SimSnapshot, Simulation, StepResult, Team,
 };
 pub use units::SConv;

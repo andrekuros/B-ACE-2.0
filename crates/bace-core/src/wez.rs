@@ -1,7 +1,7 @@
 //! Redesigned WEZ model for B-ACE 2.0.
 //!
 //! Geometric engagement envelope (not the legacy Godot Expression polynomials).
-//! RMax / RNez depend on shooter altitude, aspect, and angle-off.
+//! \(R_{\max}\) grows with reciprocal headings (closing-speed proxy) and altitude.
 
 use crate::units::SConv;
 
@@ -16,22 +16,25 @@ pub struct WezRanges {
 ///
 /// Inputs:
 /// - `shooter_alt_gdm`: altitude in GDM
-/// - `aspect_deg`: aspect angle of target from shooter
-/// - `angle_off_deg`: heading difference
+/// - `aspect_deg`: aspect angle of the target from the shooter (0 = on the nose)
+/// - `angle_off_deg`: heading difference. Reciprocal headings (`|angle_off| ≈ 180`)
+///   are a closing-speed proxy and **increase** \(R_{\max}\); co-speed/tail
+///   (`|angle_off| ≈ 0`) is the shortest envelope.
 pub fn evaluate(shooter_alt_gdm: f64, aspect_deg: f64, angle_off_deg: f64) -> WezRanges {
-    // Base ranges at 25k ft reference (~76.2 GDM)
+    // Base ranges at 25k ft reference (~76.2 GDM).
     let alt_ft = shooter_alt_gdm / SConv::FT2GDM;
     let alt_factor = (0.6 + 0.4 * (alt_ft / 25000.0).clamp(0.2, 1.5)).clamp(0.4, 1.4);
 
-    let aspect = aspect_deg.to_radians().abs();
-    let aoff = angle_off_deg.to_radians().abs();
+    let aspect = aspect_deg.abs().min(180.0);
+    let aoff = angle_off_deg.abs().min(180.0);
+    // 0 = co-speed / tail chase, 1 = reciprocal / head-on.
+    let closing = (aoff / 180.0).clamp(0.0, 1.0);
+    // Mild on-the-nose bonus; recipe analytic args use aspect = 0.
+    let nose = 1.0 - 0.12 * (aspect / 180.0).clamp(0.0, 1.0);
 
-    // Head-on aspect improves RMax; beam/tail reduces it.
-    let aspect_factor = (1.15 - 0.55 * (aspect / std::f64::consts::PI)).clamp(0.35, 1.2);
-    let aoff_factor = (1.05 - 0.35 * (aoff / std::f64::consts::PI)).clamp(0.5, 1.1);
-
-    let r_max_nm = 28.0 * alt_factor * aspect_factor * aoff_factor;
-    let r_nez_nm = r_max_nm * (0.45 + 0.15 * aspect_factor);
+    // At 25 kft, aspect=0: head (aoff=180) ≈ 40 NM, beam (90) ≈ 17 NM, tail (0) ≈ 9 NM.
+    let r_max_nm = (9.0 + 31.0 * closing * closing) * alt_factor * nose;
+    let r_nez_nm = r_max_nm * (0.35 + 0.15 * closing);
 
     WezRanges {
         r_max: (r_max_nm * SConv::NM2GDM).max(0.01),
@@ -58,11 +61,49 @@ pub fn threat_factor(range_gdm: f64, enemy_r_max: f64, enemy_r_nez: f64) -> f64 
 mod tests {
     use super::*;
 
+    fn alt_25k() -> f64 {
+        25_000.0 * SConv::FT2GDM
+    }
+
+    fn nm(w: WezRanges) -> f64 {
+        w.r_max * SConv::GDM2NM
+    }
+
     #[test]
     fn head_on_longer_than_beam() {
-        let head = evaluate(76.2, 0.0, 0.0);
-        let beam = evaluate(76.2, 90.0, 90.0);
+        let head = evaluate(alt_25k(), 0.0, 180.0);
+        let beam = evaluate(alt_25k(), 0.0, 90.0);
         assert!(head.r_max > beam.r_max);
         assert!(head.r_nez < head.r_max);
+    }
+
+    #[test]
+    fn head_beam_tail_recipe_order() {
+        let alt = alt_25k();
+        let head = evaluate(alt, 0.0, 180.0);
+        let beam = evaluate(alt, 0.0, 90.0);
+        let tail = evaluate(alt, 0.0, 0.0);
+        assert!(
+            head.r_max > beam.r_max && beam.r_max > tail.r_max,
+            "head={:.1} beam={:.1} tail={:.1} NM",
+            nm(head),
+            nm(beam),
+            nm(tail)
+        );
+        assert!(
+            (nm(head) - 40.0).abs() < 8.0,
+            "head-on Rmax {:.1} NM, expected ~40",
+            nm(head)
+        );
+        assert!(
+            (nm(beam) - 15.0).abs() < 8.0,
+            "beam Rmax {:.1} NM, expected ~15",
+            nm(beam)
+        );
+        assert!(
+            (nm(tail) - 9.0).abs() < 8.0,
+            "tail Rmax {:.1} NM, expected ~9",
+            nm(tail)
+        );
     }
 }

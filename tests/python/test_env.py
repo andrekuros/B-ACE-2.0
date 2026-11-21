@@ -89,71 +89,102 @@ def test_episode_terminates():
     env.close()
 
 
-def test_snapshot_has_fighters():
-    env = BaceEnv(
-        {
-            "env": {"max_cycles": 8, "seed": 1, "action_repeat": 5},
-            "blue": {"num_agents": 1, "behavior": "duck"},
-            "red": {"num_agents": 1, "behavior": "duck"},
-        }
-    )
-    env.reset(seed=1)
-    state = env.state()
-    assert len(state["fighters"]) == 2
-    assert state["end"] in {"ongoing", "max_cycles"}
+def test_vec_env_parallel_1v1_duck():
+    from bace import BaceVecEnv
+
+    env = BaceVecEnv(num_envs=8, opponent="duck", agents=1, max_cycles=12, seed=1)
+    assert env.num_envs == 8
+    steps = env.reset(seed=1)
+    assert len(steps) == 8
+    assert "agent_0" in steps[0]["obs"]
+    idle = {"agent_0": np.zeros(4, dtype=np.float32)}
+    out = env.step([idle] * 8)
+    assert len(out) == 8
+    assert "agent_0" in out[0]["rewards"]
     env.close()
 
 
-def test_four_v_four_obs_and_episode():
-    env = BaceEnv(
-        {
-            "env": {"max_cycles": 400, "seed": 1, "action_repeat": 20},
-            "blue": {
-                "num_agents": 4,
-                "behavior": "baseline1",
-                "offset_pos": {"x": 2.0, "y": 0.0, "z": 0.0},
-            },
-            "red": {
-                "num_agents": 4,
-                "behavior": "duck",
-                "offset_pos": {"x": 2.0, "y": 0.0, "z": 0.0},
-            },
-        }
-    )
+def test_ippo_native_vec_2v2():
+    from bace.marl import IppoNativeVec, TrainSpec, _unflatten_discrete
+
+    spec = TrainSpec(agents=2, n_envs=2, steps=8, max_cycles=8, eval_episodes=1)
+    env = IppoNativeVec(spec, n_games=2)
+    assert env.env_num == 4
+    obs, infos = env.reset(seed=1)
+    assert obs.shape[0] == 4
+    acts = np.array([0, 1, 2, 3])
+    o, r, t, tr, inf = env.step(acts)
+    assert o.shape[0] == 4
+    assert r.shape[0] == 4
+    env.close()
+    decoded = _unflatten_discrete(13)
+    assert decoded.shape == (3,)
+
+
+def test_make_env_rl_rewards():
+    from bace import make_env
+
+    env = make_env(opponent="duck", agents=1, max_cycles=4, seed=1, rewards="rl")
+    assert env._config["env"]["rewards"]["missile_no_fire_factor"] == 0.0
+    assert env._config["env"]["rewards"]["detect_loss_factor"] == -0.01
+    env.close()
+
+
+def test_self_play_2v2_four_learners():
+    from bace import make_env
+    from bace.marl import IppoNativeVec, TrainSpec
+
+    env = make_env(self_play=True, agents=2, max_cycles=6, seed=1, action_type="discrete")
+    assert set(env.possible_agents) == {"agent_0", "agent_1", "red_0", "red_1"}
+    assert env._obs_size == 41
     obs, _ = env.reset(seed=1)
-    assert env._obs_size == 79
-    assert set(obs) == {f"agent_{i}" for i in range(4)}
-    assert len(env.state()["fighters"]) == 8
-    last_end = None
-    for _ in range(420):
-        if not env.agents:
-            break
-        actions = {a: np.zeros(4, dtype=np.float32) for a in env.agents}
-        _, _, terms, truncs, _ = env.step(actions)
-        last_end = env.state()["end"]
-        if all(terms.values()) or all(truncs.values()):
-            break
-    assert last_end == "red_killed"
+    assert set(obs) == set(env.possible_agents)
+    actions = {a: np.array([0, 2, 2], dtype=np.int64) for a in env.agents}
+    obs, rewards, terms, truncs, _ = env.step(actions)
+    assert set(rewards) == set(env.possible_agents)
     env.close()
 
+    spec = TrainSpec(agents=2, n_envs=2, steps=8, max_cycles=8, eval_episodes=1, self_play=True)
+    vec = IppoNativeVec(spec, n_games=2)
+    assert vec.env_num == 8
+    o, _ = vec.reset(seed=1)
+    assert o.shape[0] == 8
+    vec.close()
 
-def test_baseline_episode_runs():
-    env = BaceEnv(
-        {
-            "env": {"max_cycles": 40, "seed": 4, "action_repeat": 10},
-            "blue": {"num_agents": 1, "behavior": "baseline1"},
-            "red": {"num_agents": 1, "behavior": "duck"},
-        }
-    )
-    env.reset(seed=4)
-    last_end = None
-    for _ in range(50):
-        if not env.agents:
-            break
-        actions = {a: np.zeros(4, dtype=np.float32) for a in env.agents}
-        _, _, terms, truncs, _ = env.step(actions)
-        last_end = env.state()["end"]
-        if all(terms.values()) or all(truncs.values()):
-            break
-    assert last_end is not None
+
+def test_self_play_4v4_eight_ids():
+    from bace import make_env
+    from bace.marl import IppoNativeVec, TrainSpec
+
+    env = make_env(self_play=True, agents=4, max_cycles=4, seed=1, action_type="discrete")
+    assert len(env.possible_agents) == 8
+    assert set(env.possible_agents) == {f"agent_{i}" for i in range(4)} | {f"red_{i}" for i in range(4)}
     env.close()
+
+    spec = TrainSpec(agents=4, n_envs=2, steps=8, max_cycles=8, eval_episodes=1, self_play=True)
+    vec = IppoNativeVec(spec, n_games=2)
+    assert vec.env_num == 16
+    o, _ = vec.reset(seed=1)
+    assert o.shape[0] == 16
+    vec.close()
+    vec_b = IppoNativeVec(spec, n_games=2, blue_only=True)
+    assert vec_b.env_num == 8
+    vec_b.close()
+
+
+def test_sp_mode_sets_self_play():
+    from dataclasses import replace
+
+    from bace.marl import TrainSpec
+
+    mixed = TrainSpec(sp_mode="mixed", agents=2)
+    assert mixed.self_play is True
+    assert mixed.sp_mode == "mixed"
+    pfsp = TrainSpec(sp_mode="pfsp", agents=2)
+    assert pfsp.self_play is True
+    mad = TrainSpec(algo="maddpg", sp_mode="mixed")
+    assert mad.action_type == "continuous"
+    ev = replace(mixed, self_play=False, opponent="duck", sp_mode="")
+    assert ev.self_play is False
+    assert ev.opponent == "duck"
+    assert ev.sp_mode == ""

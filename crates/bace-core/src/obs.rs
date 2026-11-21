@@ -144,6 +144,14 @@ pub struct DiscreteAction {
 }
 
 impl DiscreteAction {
+    pub fn from_ints(vals: &[i64]) -> Self {
+        Self {
+            fire: vals.first().copied().unwrap_or(0).clamp(0, 1) as u8,
+            level: vals.get(1).copied().unwrap_or(2).clamp(0, 4) as u8,
+            turn: vals.get(2).copied().unwrap_or(2).clamp(0, 4) as u8,
+        }
+    }
+
     pub fn to_continuous(self) -> Action {
         let turn_deg = match self.turn {
             0 => -90.0,

@@ -288,7 +288,44 @@ impl Fighter {
                 self.fire_cmd = false;
             }
             Behavior::Baseline1 => self.run_baseline1(),
+            Behavior::FireOnce => self.run_fire_once(),
         }
+    }
+
+    fn run_fire_once(&mut self) {
+        let hpt = self
+            .hpt_id
+            .and_then(|id| self.enemy_tracks.iter().find(|t| t.id == id && t.detected))
+            .cloned();
+
+        if self.supporting_missile {
+            self.fsm = FsmState::MissileSupport;
+            if let Some(ref t) = hpt {
+                self.hdg_cmd = clamp_hdg(self.hdg + t.aspect);
+            } else {
+                self.hdg_cmd = heading_to(self.pos, self.target_pos);
+            }
+            self.level_cmd = self.target_pos[1];
+            self.g_cmd = 2.0;
+            self.fire_cmd = false;
+            return;
+        }
+
+        if let Some(ref t) = hpt {
+            self.fsm = FsmState::Engage;
+            self.hdg_cmd = clamp_hdg(self.hdg + t.aspect);
+            self.level_cmd = self.pos[1];
+            self.g_cmd = 2.0;
+            // One shot only (spawn load is 6).
+            self.fire_cmd = t.aspect.abs() < 30.0 && self.missiles == 6;
+            return;
+        }
+
+        self.fsm = FsmState::Search;
+        self.hdg_cmd = heading_to(self.pos, self.target_pos);
+        self.level_cmd = self.target_pos[1];
+        self.g_cmd = 1.0;
+        self.fire_cmd = false;
     }
 
     fn run_baseline1(&mut self) {
@@ -307,9 +344,7 @@ impl Fighter {
                 let side = if t.aspect >= 0.0 { 1.0 } else { -1.0 };
                 self.hdg_cmd = clamp_hdg(self.hdg + 90.0 * side);
                 self.g_cmd = self.max_g * 0.8;
-                // Shoot-then-break: still pickle if the target is in WEZ and on the nose.
-                let range_ratio = t.dist / t.own_wez.r_max.max(1e-6);
-                self.fire_cmd = range_ratio <= d_shot && t.aspect.abs() < 30.0 && self.missiles > 0;
+                self.fire_cmd = false;
                 return;
             }
         }

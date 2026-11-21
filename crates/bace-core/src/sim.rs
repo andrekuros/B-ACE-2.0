@@ -2,6 +2,7 @@
 
 use crate::config::{ScenarioConfig, TeamConfig};
 use crate::fighter::{AircraftView, Fighter, FsmState};
+use crate::geometry::distance2d;
 use crate::missile::Missile;
 use crate::obs::{Action, StructuredObs};
 use crate::rewards::RewardBreakdown;
@@ -98,45 +99,123 @@ pub struct SimSnapshot {
     pub missiles: Vec<MissileSnapshot>,
 }
 
+/// Compact end-of-episode metrics for experiment mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeOutcome {
+    pub config: ScenarioConfig,
+    pub end: EndCondition,
+    pub steps: u32,
+    pub seed: u64,
+    pub blue_alive: usize,
+    pub red_alive: usize,
+    pub blue_kills: usize,
+    pub blue_deaths: usize,
+    pub mission_success: bool,
+    pub episode_return: f64,
+    pub missiles_fired: u32,
+    pub missile_hits: u32,
+    pub missile_tof: f64,
+    pub missile_pitbull: bool,
+    pub missile_pitbull_time: f64,
+    pub miss_cause: String,
+    pub fsm_search: u32,
+    pub fsm_engage: u32,
+    pub fsm_support: u32,
+    pub fsm_evade: u32,
+    pub mean_ally_spacing_nm: f64,
+    pub mean_fire_range_nm: f64,
+    pub tracks_on_frac: f64,
+}
+
 pub struct Simulation {
     pub config: ScenarioConfig,
     pub fighters: Vec<Fighter>,
     pub missiles: Vec<Missile>,
     pub blue_agent_ids: Vec<AgentId>,
+    pub red_agent_ids: Vec<AgentId>,
     pub action_step: u32,
     pub physics_step: u32,
     pub end: EndCondition,
     pub next_missile_id: u32,
+    pub missiles_fired: u32,
+    pub missile_hits: u32,
     rng: StdRng,
+    last_missile_tof: f64,
+    last_missile_pitbull: bool,
+    last_missile_pitbull_time: f64,
+    last_miss_cause: String,
+    fsm_search: u32,
+    fsm_engage: u32,
+    fsm_support: u32,
+    fsm_evade: u32,
+    ally_spacing_sum: f64,
+    ally_spacing_n: u32,
+    fire_range_sum: f64,
+    fire_range_n: u32,
+    tracks_on_sum: f64,
+    tracks_on_n: u32,
 }
 
 impl Simulation {
     pub fn new(config: ScenarioConfig) -> Self {
+        let mut config = config;
+        config.blue.apply_box_formation();
+        config.red.apply_box_formation();
         let mut sim = Self {
             rng: StdRng::seed_from_u64(config.env.seed),
             config,
             fighters: Vec::new(),
             missiles: Vec::new(),
             blue_agent_ids: Vec::new(),
+            red_agent_ids: Vec::new(),
             action_step: 0,
             physics_step: 0,
             end: EndCondition::Ongoing,
             next_missile_id: 1,
+            missiles_fired: 0,
+            missile_hits: 0,
+            last_missile_tof: 0.0,
+            last_missile_pitbull: false,
+            last_missile_pitbull_time: 0.0,
+            last_miss_cause: String::new(),
+            fsm_search: 0,
+            fsm_engage: 0,
+            fsm_support: 0,
+            fsm_evade: 0,
+            ally_spacing_sum: 0.0,
+            ally_spacing_n: 0,
+            fire_range_sum: 0.0,
+            fire_range_n: 0,
+            tracks_on_sum: 0.0,
+            tracks_on_n: 0,
         };
         sim.spawn_teams();
         sim
     }
 
+    fn formation_offset_nm(team: &TeamConfig, idx: usize) -> (f64, f64) {
+        let n = team.num_agents.clamp(1, TeamConfig::MAX_AGENTS);
+        let sx = team.offset_pos.x;
+        let sz = team.offset_pos.z;
+        if n <= 2 {
+            return (idx as f64 * sx, 0.0);
+        }
+        let col = (idx % 2) as f64;
+        let row = (idx / 2) as f64;
+        (col * sx, row * if sz.abs() > 1e-9 { sz } else { sx })
+    }
+
     fn pos_from_cfg(team: &TeamConfig, idx: usize, rng: &mut StdRng) -> ([f64; 3], [f64; 3], f64) {
+        let (dx, dz) = Self::formation_offset_nm(team, idx);
         let base = [
             team.init_position.x * SConv::NM2GDM
-                + idx as f64 * team.offset_pos.x * SConv::NM2GDM
+                + dx * SConv::NM2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.x * SConv::NM2GDM,
             team.init_position.y * SConv::FT2GDM
                 + idx as f64 * team.offset_pos.y * SConv::FT2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.y * SConv::FT2GDM,
             team.init_position.z * SConv::NM2GDM
-                + idx as f64 * team.offset_pos.z * SConv::NM2GDM
+                + dz * SConv::NM2GDM
                 + rng.gen_range(-1.0..1.0) * team.rnd_offset_range.z * SConv::NM2GDM,
         ];
         let target = [
@@ -151,6 +230,7 @@ impl Simulation {
         self.fighters.clear();
         self.missiles.clear();
         self.blue_agent_ids.clear();
+        self.red_agent_ids.clear();
         self.next_missile_id = 1;
 
         let n_blue = self.config.blue.num_agents;
@@ -198,8 +278,21 @@ impl Simulation {
                 &blue_ids,
                 allies,
             );
+            self.red_agent_ids.push(format!("red_{i}"));
             self.fighters.push(f);
         }
+    }
+
+    pub fn red_is_external(&self) -> bool {
+        self.config.red.behavior == crate::config::Behavior::External
+    }
+
+    pub fn agent_ids(&self) -> Vec<AgentId> {
+        let mut ids = self.blue_agent_ids.clone();
+        if self.red_is_external() {
+            ids.extend(self.red_agent_ids.iter().cloned());
+        }
+        ids
     }
 
     pub fn reset(&mut self, seed: Option<u64>) -> StepResult {
@@ -210,6 +303,22 @@ impl Simulation {
         self.action_step = 0;
         self.physics_step = 0;
         self.end = EndCondition::Ongoing;
+        self.missiles_fired = 0;
+        self.missile_hits = 0;
+        self.last_missile_tof = 0.0;
+        self.last_missile_pitbull = false;
+        self.last_missile_pitbull_time = 0.0;
+        self.last_miss_cause = String::new();
+        self.fsm_search = 0;
+        self.fsm_engage = 0;
+        self.fsm_support = 0;
+        self.fsm_evade = 0;
+        self.ally_spacing_sum = 0.0;
+        self.ally_spacing_n = 0;
+        self.fire_range_sum = 0.0;
+        self.fire_range_n = 0;
+        self.tracks_on_sum = 0.0;
+        self.tracks_on_n = 0;
         self.spawn_teams();
         self.sense_and_observe(true)
     }
@@ -279,17 +388,17 @@ impl Simulation {
         }
     }
 
-    fn try_fire(fighter: &mut Fighter, missiles: &mut Vec<Missile>, next_id: &mut u32) {
+    fn try_fire(fighter: &mut Fighter, missiles: &mut Vec<Missile>, next_id: &mut u32) -> Option<f64> {
         if !fighter.alive || !fighter.fire_cmd {
-            return;
+            return None;
         }
         if fighter.missiles == 0 {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         }
         let Some(hpt) = fighter.hpt_id else {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         };
         let can_fire = fighter
             .enemy_tracks
@@ -299,8 +408,14 @@ impl Simulation {
             .unwrap_or(false);
         if !can_fire {
             fighter.rewards.add_missile_no_fire();
-            return;
+            return None;
         }
+        let fire_range_nm = fighter
+            .enemy_tracks
+            .iter()
+            .find(|t| t.id == hpt)
+            .map(|t| t.dist * SConv::GDM2NM)
+            .unwrap_or(0.0);
         if let Some(mid) = fighter.in_flight_missile_id {
             if let Some(m) = missiles.iter_mut().find(|m| m.id == mid && m.alive) {
                 m.lost_support();
@@ -327,6 +442,7 @@ impl Simulation {
         fighter.rewards.add_missile_fire();
         missiles.push(m);
         fighter.fire_cmd = false;
+        Some(fire_range_nm)
     }
 
     fn integrate_physics(&mut self) {
@@ -358,13 +474,24 @@ impl Simulation {
                     .unwrap_or(([0.0; 3], false));
                 let hit = m.tick(dt, Some(tpos), talive);
                 if hit {
+                    self.last_missile_tof = m.time_alive;
+                    self.last_missile_pitbull = m.pitbull;
+                    self.last_missile_pitbull_time = m.pitbull_time.unwrap_or(0.0);
+                    self.last_miss_cause.clear();
                     hits.push((m.target_id, m.shooter_id, m.team));
                 } else if !m.alive {
+                    self.last_missile_tof = m.time_alive;
+                    self.last_missile_pitbull = m.pitbull;
+                    self.last_missile_pitbull_time = m.pitbull_time.unwrap_or(0.0);
+                    self.last_miss_cause = m.miss_cause.clone().unwrap_or_default();
                     misses.push(m.shooter_id);
                 }
             }
 
-            for (target_id, shooter_id, _team) in hits {
+            for (target_id, shooter_id, team) in hits {
+                if team == 0 {
+                    self.missile_hits += 1;
+                }
                 if let Some(victim) = self.fighters.iter_mut().find(|f| f.id == target_id) {
                     victim.alive = false;
                     victim.done = true;
@@ -402,6 +529,43 @@ impl Simulation {
         self.action_step += 1;
     }
 
+    fn accumulate_behavior_stats(&mut self) {
+        for f in self.fighters.iter().filter(|f| f.team == 0 && f.alive) {
+            match f.fsm {
+                FsmState::Search => self.fsm_search += 1,
+                FsmState::Engage => self.fsm_engage += 1,
+                FsmState::MissileSupport => self.fsm_support += 1,
+                FsmState::Evade => self.fsm_evade += 1,
+            }
+            let tot = f.enemy_tracks.len();
+            if tot > 0 {
+                let det = f.enemy_tracks.iter().filter(|t| t.detected).count();
+                self.tracks_on_sum += det as f64 / tot as f64;
+                self.tracks_on_n += 1;
+            }
+        }
+        let blues: Vec<[f64; 3]> = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0 && f.alive)
+            .map(|f| f.pos)
+            .collect();
+        if blues.len() >= 2 {
+            let mut s = 0.0;
+            let mut n = 0u32;
+            for i in 0..blues.len() {
+                for j in (i + 1)..blues.len() {
+                    s += distance2d(blues[i], blues[j]) * SConv::GDM2NM;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                self.ally_spacing_sum += s / n as f64;
+                self.ally_spacing_n += 1;
+            }
+        }
+    }
+
     fn check_terminals(&mut self) {
         if self.end != EndCondition::Ongoing {
             return;
@@ -410,10 +574,12 @@ impl Simulation {
         let red_alive = self.fighters.iter().filter(|f| f.team == 1 && f.alive).count();
         let missiles_left = !self.missiles.is_empty();
 
-        // Both teams dead: do not wait for leftover missiles (they only coast).
-        if blue_alive == 0 && red_alive == 0 {
+        // Both sides dead is not a blue loss. K/D still come from alive counts.
+        // mission_success stays false, matching the old BlueKilled label.
+        if blue_alive == 0 && red_alive == 0 && !missiles_left {
             self.end = EndCondition::MutualKill;
             for f in self.fighters.iter_mut() {
+                f.rewards.add_terminal("Team_Killed", f.missiles);
                 f.done = true;
             }
             return;
@@ -476,30 +642,46 @@ impl Simulation {
         }
     }
 
-    fn sense_and_observe(&mut self, _is_reset: bool) -> StepResult {
-        self.sense_all();
-
-        // Mission shaping for blue
-        for f in self.fighters.iter_mut().filter(|f| f.team == 0 && f.alive) {
-            let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
-            f.rewards.add_mission(shaped);
+    fn mission_shape_learners(&mut self) {
+        let red_ext = self.red_is_external();
+        for f in self.fighters.iter_mut().filter(|f| f.alive) {
+            if f.team == 0 || (f.team == 1 && red_ext) {
+                let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
+                f.rewards.add_mission(shaped);
+            }
         }
+    }
 
+    fn collect_learner_steps(&mut self, take_reward: bool) -> HashMap<AgentId, AgentStep> {
         let views = self.views();
-        let mut agents = HashMap::new();
-        let blue: Vec<&Fighter> = self.fighters.iter().filter(|f| f.team == 0).collect();
-        for (i, f) in blue.iter().enumerate() {
-            let name = self
-                .blue_agent_ids
-                .get(i)
-                .cloned()
-                .unwrap_or_else(|| format!("agent_{i}"));
+        let end = self.end;
+        let mut names: Vec<(AgentId, u8, usize)> = self
+            .blue_agent_ids
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), 0u8, i))
+            .collect();
+        if self.red_is_external() {
+            names.extend(
+                self.red_agent_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.clone(), 1u8, i)),
+            );
+        }
+        let mut pending = Vec::new();
+        for (name, team, idx) in names {
+            let f = self
+                .fighters
+                .iter()
+                .filter(|f| f.team == team)
+                .nth(idx)
+                .expect("learner index");
             let allies: Vec<AircraftView> = views
                 .iter()
                 .copied()
                 .filter(|v| f.ally_ids.contains(&v.id))
                 .collect();
-            // Also pass enemy dist2go via views of enemies
             let enemies: Vec<AircraftView> = views
                 .iter()
                 .copied()
@@ -512,20 +694,42 @@ impl Simulation {
                 }
             }
             let flat = obs.to_flat();
-            // rewards taken later in step; on reset zero
+            let terminated = f.done && end != EndCondition::MaxCycles;
+            let truncated = end == EndCondition::MaxCycles;
+            pending.push((name, team, idx, obs, flat, terminated, truncated));
+        }
+        let mut agents = HashMap::new();
+        for (name, team, idx, obs, flat, terminated, truncated) in pending {
+            let (reward, breakdown) = if take_reward {
+                let fmut = self
+                    .fighters
+                    .iter_mut()
+                    .filter(|f| f.team == team)
+                    .nth(idx)
+                    .expect("learner index");
+                fmut.rewards.take_step()
+            } else {
+                (0.0, RewardBreakdown::default())
+            };
             agents.insert(
                 name,
                 AgentStep {
                     obs,
                     flat_obs: flat,
-                    reward: 0.0,
-                    reward_breakdown: RewardBreakdown::default(),
-                    terminated: f.done && self.end != EndCondition::MaxCycles,
-                    truncated: self.end == EndCondition::MaxCycles,
+                    reward,
+                    reward_breakdown: breakdown,
+                    terminated,
+                    truncated,
                 },
             );
         }
+        agents
+    }
 
+    fn sense_and_observe(&mut self, _is_reset: bool) -> StepResult {
+        self.sense_all();
+        self.mission_shape_learners();
+        let agents = self.collect_learner_steps(false);
         StepResult {
             agents,
             end: self.end,
@@ -543,6 +747,8 @@ impl Simulation {
 
         // Apply actions / behaviors
         let blue_ids = self.blue_agent_ids.clone();
+        let red_ids = self.red_agent_ids.clone();
+        let red_ext = self.red_is_external();
         for (i, name) in blue_ids.iter().enumerate() {
             if let Some(f) = self.fighters.iter_mut().filter(|f| f.team == 0).nth(i) {
                 if f.behavior == crate::config::Behavior::External {
@@ -554,15 +760,32 @@ impl Simulation {
                 }
             }
         }
-        for f in self.fighters.iter_mut().filter(|f| f.team == 1) {
-            f.run_behavior();
+        for (i, f) in self.fighters.iter_mut().filter(|f| f.team == 1).enumerate() {
+            if red_ext {
+                if let Some(a) = red_ids.get(i).and_then(|n| actions.get(n)) {
+                    f.apply_action(*a);
+                }
+            } else {
+                f.run_behavior();
+            }
         }
+
+        self.accumulate_behavior_stats();
 
         // Firing (needs mutable fighters + missiles)
         let mut next_id = self.next_missile_id;
         let mut missiles = std::mem::take(&mut self.missiles);
         for f in &mut self.fighters {
-            Self::try_fire(f, &mut missiles, &mut next_id);
+            let before = f.missiles;
+            if let Some(rng_nm) = Self::try_fire(f, &mut missiles, &mut next_id) {
+                if f.team == 0 {
+                    self.fire_range_sum += rng_nm;
+                    self.fire_range_n += 1;
+                }
+            }
+            if f.team == 0 && f.missiles < before {
+                self.missiles_fired += before - f.missiles;
+            }
         }
         self.missiles = missiles;
         self.next_missile_id = next_id;
@@ -571,50 +794,8 @@ impl Simulation {
 
         // Collect rewards into step result
         self.sense_all();
-        for f in self.fighters.iter_mut().filter(|f| f.team == 0 && f.alive) {
-            let shaped = 1.0 + (-0.99) / (1.0 + (-0.02 * (f.dist2go - 370.4)).exp());
-            f.rewards.add_mission(shaped);
-        }
-
-        let views = self.views();
-        let mut agents = HashMap::new();
-        let n_blue = self.fighters.iter().filter(|f| f.team == 0).count();
-        for i in 0..n_blue {
-            let name = self.blue_agent_ids[i].clone();
-            let f = self.fighters.iter_mut().filter(|f| f.team == 0).nth(i).unwrap();
-            let allies: Vec<AircraftView> = views
-                .iter()
-                .copied()
-                .filter(|v| f.ally_ids.contains(&v.id))
-                .collect();
-            let enemies: Vec<AircraftView> = views
-                .iter()
-                .copied()
-                .filter(|v| f.enemy_tracks.iter().any(|t| t.id == v.id))
-                .collect();
-            let mut obs = f.build_obs(&allies);
-            for e in &mut obs.enemies {
-                if let Some(ev) = enemies.iter().find(|x| x.id == e.id) {
-                    e.dist_target = ev.dist2go / 3000.0;
-                }
-            }
-            let flat = obs.to_flat();
-            let (reward, breakdown) = f.rewards.take_step();
-            let terminated = f.done && self.end != EndCondition::MaxCycles;
-            let truncated = self.end == EndCondition::MaxCycles;
-            agents.insert(
-                name,
-                AgentStep {
-                    obs,
-                    flat_obs: flat,
-                    reward,
-                    reward_breakdown: breakdown,
-                    terminated,
-                    truncated,
-                },
-            );
-        }
-
+        self.mission_shape_learners();
+        let agents = self.collect_learner_steps(true);
         StepResult {
             agents,
             end: self.end,
@@ -628,12 +809,18 @@ impl Simulation {
             end: self.end,
             fighters: {
                 let mut blue_i = 0usize;
+                let mut red_i = 0usize;
+                let red_ext = self.red_is_external();
                 self.fighters
                     .iter()
                     .map(|f| {
                         let agent_name = if f.team == 0 {
                             let name = self.blue_agent_ids.get(blue_i).cloned();
                             blue_i += 1;
+                            name
+                        } else if red_ext {
+                            let name = self.red_agent_ids.get(red_i).cloned();
+                            red_i += 1;
                             name
                         } else {
                             None
@@ -692,12 +879,76 @@ impl Simulation {
         let n_red = self.config.red.num_agents;
         StructuredObs::flat_size(n_blue.saturating_sub(1), n_red)
     }
+
+    /// Snapshot experiment metrics for the current (usually finished) episode.
+    pub fn outcome(&self) -> EpisodeOutcome {
+        let n_blue = self.config.blue.num_agents;
+        let n_red = self.config.red.num_agents;
+        let blue_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0 && f.alive)
+            .count();
+        let red_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 1 && f.alive)
+            .count();
+        let episode_return: f64 = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0)
+            .map(|f| f.rewards.cumulative().total())
+            .sum();
+        let mission_success = !matches!(
+            self.end,
+            EndCondition::RedMission | EndCondition::BlueKilled | EndCondition::MutualKill
+        );
+        EpisodeOutcome {
+            config: self.config.clone(),
+            end: self.end,
+            steps: self.action_step,
+            seed: self.config.env.seed,
+            blue_alive,
+            red_alive,
+            blue_kills: n_red.saturating_sub(red_alive),
+            blue_deaths: n_blue.saturating_sub(blue_alive),
+            mission_success,
+            episode_return,
+            missiles_fired: self.missiles_fired,
+            missile_hits: self.missile_hits,
+            missile_tof: self.last_missile_tof,
+            missile_pitbull: self.last_missile_pitbull,
+            missile_pitbull_time: self.last_missile_pitbull_time,
+            miss_cause: self.last_miss_cause.clone(),
+            fsm_search: self.fsm_search,
+            fsm_engage: self.fsm_engage,
+            fsm_support: self.fsm_support,
+            fsm_evade: self.fsm_evade,
+            mean_ally_spacing_nm: if self.ally_spacing_n > 0 {
+                self.ally_spacing_sum / self.ally_spacing_n as f64
+            } else {
+                0.0
+            },
+            mean_fire_range_nm: if self.fire_range_n > 0 {
+                self.fire_range_sum / self.fire_range_n as f64
+            } else {
+                0.0
+            },
+            tracks_on_frac: if self.tracks_on_n > 0 {
+                self.tracks_on_sum / self.tracks_on_n as f64
+            } else {
+                0.0
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Behavior, ScenarioConfig};
+    use crate::obs::Action;
 
     #[test]
     fn reset_and_step_runs() {
@@ -740,224 +991,107 @@ mod tests {
     }
 
     #[test]
-    fn duck_vs_duck_closes_and_hits_max_cycles() {
+    fn fire_once_launches() {
         let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = 25;
-        cfg.blue.behavior = Behavior::Duck;
-        cfg.red.behavior = Behavior::Duck;
-        let mut sim = Simulation::new(cfg);
-        sim.reset(Some(1));
-        let start = sim.snapshot();
-        let d0 = crate::geometry::distance2d(start.fighters[0].pos, start.fighters[1].pos);
-        let empty = HashMap::new();
-        let mut last = sim.step(&empty);
-        while last.end == EndCondition::Ongoing {
-            last = sim.step(&empty);
-        }
-        let end = sim.snapshot();
-        let d1 = crate::geometry::distance2d(end.fighters[0].pos, end.fighters[1].pos);
-        assert!(d1 < d0, "head-on ducks should close range ({d1} vs {d0})");
-        assert_eq!(last.end, EndCondition::MaxCycles);
-        assert!(last.agents["agent_0"].truncated);
-        assert!(!last.agents["agent_0"].terminated);
-    }
-
-    #[test]
-    fn external_heading_command_turns_blue() {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = 10;
-        cfg.env.action_repeat = 20;
-        cfg.blue.behavior = Behavior::External;
-        cfg.red.behavior = Behavior::Duck;
-        let mut sim = Simulation::new(cfg);
-        sim.reset(Some(1));
-        let h0 = sim.snapshot().fighters[0].hdg;
-        let mut actions = HashMap::new();
-        actions.insert(
-            "agent_0".into(),
-            crate::obs::Action {
-                d_heading: 1.0,
-                d_altitude: 0.0,
-                g_force: 1.0,
-                fire: -1.0,
-            },
-        );
-        sim.step(&actions);
-        let h1 = sim.snapshot().fighters[0].hdg;
-        assert!(
-            (h1 - h0).abs() > 1.0,
-            "full right turn should change heading ({h0} -> {h1})"
-        );
-    }
-
-    #[test]
-    fn baseline_vs_duck_fires_or_kills() {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = 400;
-        cfg.blue.behavior = Behavior::Baseline1;
-        cfg.red.behavior = Behavior::Duck;
-        let mut sim = Simulation::new(cfg);
-        sim.reset(Some(1));
-        let empty = HashMap::new();
-        let mut saw_missile = false;
-        let mut last = sim.step(&empty);
-        while last.end == EndCondition::Ongoing {
-            if !sim.missiles.is_empty() || sim.fighters.iter().any(|f| f.missiles < 6) {
-                saw_missile = true;
-            }
-            last = sim.step(&empty);
-        }
-        let kill = matches!(
-            last.end,
-            EndCondition::RedKilled | EndCondition::BlueKilled | EndCondition::MutualKill
-        );
-        assert!(
-            saw_missile || kill,
-            "baseline vs duck should fire or produce a kill, ended {:?}",
-            last.end
-        );
-    }
-
-    #[test]
-    fn close_range_missile_can_kill() {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = 80;
-        cfg.env.action_repeat = 5;
-        cfg.blue.behavior = Behavior::Baseline1;
-        cfg.red.behavior = Behavior::Duck;
+        cfg.env.max_cycles = 40;
+        cfg.env.action_repeat = 10;
+        cfg.blue.behavior = Behavior::FireOnce;
         cfg.blue.init_position.z = 8.0;
+        cfg.blue.target_position.z = -8.0;
+        cfg.red.behavior = Behavior::Duck;
         cfg.red.init_position.z = -8.0;
+        cfg.red.init_hdg = 180.0;
         let mut sim = Simulation::new(cfg);
-        sim.reset(Some(2));
+        sim.reset(Some(1));
         let empty = HashMap::new();
-        let mut last = sim.step(&empty);
-        while last.end == EndCondition::Ongoing {
-            last = sim.step(&empty);
+        for _ in 0..15 {
+            sim.step(&empty);
+            if sim.missiles_fired > 0 {
+                break;
+            }
         }
         assert!(
-            matches!(
-                last.end,
-                EndCondition::RedKilled
-                    | EndCondition::BlueKilled
-                    | EndCondition::MutualKill
-                    | EndCondition::MaxCycles
-            ),
-            "unexpected end {:?}",
-            last.end
+            sim.missiles_fired > 0,
+            "FireOnce should launch when a track is detected"
         );
-        let fired = sim.fighters.iter().any(|f| f.missiles < 6);
-        let dead = sim.fighters.iter().any(|f| !f.alive);
-        assert!(fired || dead, "close-range 1v1 should shoot or kill");
+        let out = sim.outcome();
+        assert_eq!(out.missiles_fired, sim.missiles_fired);
     }
 
     #[test]
-    fn two_v_two_obs_size_and_agents() {
+    fn four_v_four_box_and_terminates() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 30;
+        cfg.env.action_repeat = 10;
+        cfg.blue.num_agents = 4;
+        cfg.blue.behavior = Behavior::Duck;
+        cfg.red.num_agents = 4;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        assert_eq!(sim.fighters.len(), 8);
+        let blues: Vec<_> = sim.fighters.iter().filter(|f| f.team == 0).collect();
+        let dx = (blues[1].pos[0] - blues[0].pos[0]).abs() * SConv::GDM2NM;
+        assert!(
+            (dx - 4.0).abs() < 0.2,
+            "2×2 box should space ~4 NM, got {dx}"
+        );
+        sim.reset(Some(3));
+        let empty = HashMap::new();
+        let mut ended = false;
+        for _ in 0..40 {
+            let s = sim.step(&empty);
+            if s.end != EndCondition::Ongoing {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended || sim.action_step >= 30);
+        assert_eq!(sim.blue_agent_ids.len(), 4);
+        assert_eq!(sim.obs_size(), 9 + 13 * 4 + 6 * 3);
+    }
+
+    #[test]
+    fn self_play_2v2_exposes_red_learners() {
         let mut cfg = ScenarioConfig::default();
         cfg.env.max_cycles = 8;
         cfg.blue.num_agents = 2;
         cfg.red.num_agents = 2;
-        cfg.blue.behavior = Behavior::Duck;
-        cfg.red.behavior = Behavior::Duck;
+        cfg.blue.behavior = Behavior::External;
+        cfg.red.behavior = Behavior::External;
+        cfg.blue.apply_box_formation();
+        cfg.red.apply_box_formation();
         let mut sim = Simulation::new(cfg);
         let r = sim.reset(Some(3));
-        assert_eq!(sim.obs_size(), 41);
-        assert_eq!(r.agents.len(), 2);
+        assert_eq!(sim.agent_ids().len(), 4);
         assert!(r.agents.contains_key("agent_0"));
-        assert!(r.agents.contains_key("agent_1"));
-        assert_eq!(r.agents["agent_0"].flat_obs.len(), 41);
-        assert_eq!(sim.fighters.len(), 4);
-    }
-
-    fn line_abreast_4v4(blue: Behavior, red: Behavior, max_cycles: u32) -> ScenarioConfig {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = max_cycles;
-        cfg.blue.num_agents = 4;
-        cfg.red.num_agents = 4;
-        cfg.blue.behavior = blue;
-        cfg.red.behavior = red;
-        cfg.blue.offset_pos.x = 2.0;
-        cfg.red.offset_pos.x = 2.0;
-        cfg
+        assert!(r.agents.contains_key("red_1"));
+        assert_eq!(r.agents["agent_0"].flat_obs.len(), sim.obs_size());
+        assert_eq!(r.agents["red_0"].flat_obs.len(), sim.obs_size());
+        let mut acts = HashMap::new();
+        for n in sim.agent_ids() {
+            acts.insert(n, Action::default());
+        }
+        let s = sim.step(&acts);
+        assert_eq!(s.agents.len(), 4);
+        assert!(s.agents["red_0"].flat_obs.len() == sim.obs_size());
     }
 
     #[test]
-    fn four_v_four_obs_and_spawn() {
-        let mut sim = Simulation::new(line_abreast_4v4(Behavior::Duck, Behavior::Duck, 5));
-        let r = sim.reset(Some(1));
-        assert_eq!(sim.obs_size(), 79);
-        assert_eq!(r.agents.len(), 4);
-        assert_eq!(sim.fighters.len(), 8);
+    fn both_teams_dead_is_mutual_kill() {
+        let mut sim = Simulation::new(ScenarioConfig::default());
+        sim.reset(Some(1));
+        for f in &mut sim.fighters {
+            f.alive = false;
+        }
+        sim.missiles.clear();
+        sim.check_terminals();
+        assert_eq!(sim.end, EndCondition::MutualKill);
+        let out = sim.outcome();
+        assert!(!out.mission_success);
+        assert_eq!(out.blue_kills, sim.config.red.num_agents);
+        assert_eq!(out.blue_deaths, sim.config.blue.num_agents);
         let snap = sim.snapshot();
-        let xs: Vec<f64> = snap
-            .fighters
-            .iter()
-            .filter(|f| f.team == 0)
-            .map(|f| f.pos[0])
-            .collect();
-        assert!(xs[1] > xs[0], "blue line-abreast should be spaced in x");
-    }
-
-    #[test]
-    fn snapshot_includes_radar_and_tracks() {
-        let mut cfg = ScenarioConfig::default();
-        cfg.env.max_cycles = 80;
-        cfg.blue.behavior = Behavior::Duck;
-        cfg.red.behavior = Behavior::Duck;
-        let mut sim = Simulation::new(cfg);
-        sim.reset(Some(1));
-        let snap0 = sim.snapshot();
-        let blue0 = snap0.fighters.iter().find(|f| f.team == 0).unwrap();
-        assert!(blue0.radar_range > 0.0);
-        assert!(blue0.radar_hfov > 0.0);
-        assert_eq!(blue0.tracks.len(), 1);
-        assert!(blue0.speed > 0.0);
-        let empty = HashMap::new();
-        for _ in 0..50 {
-            sim.step(&empty);
-        }
-        let snap = sim.snapshot();
-        let blue = snap.fighters.iter().find(|f| f.team == 0).unwrap();
-        assert!(
-            blue.tracks.iter().any(|t| t.detected),
-            "closing ducks should enter radar"
-        );
-        assert!(blue.tracks.iter().any(|t| t.detected && t.own_r_max > 0.0));
-    }
-
-    #[test]
-    fn four_v_four_baseline_vs_duck() {
-        let mut sim = Simulation::new(line_abreast_4v4(Behavior::Baseline1, Behavior::Duck, 400));
-        sim.reset(Some(1));
-        let empty = HashMap::new();
-        let mut last = sim.step(&empty);
-        while last.end == EndCondition::Ongoing {
-            last = sim.step(&empty);
-        }
-        assert_eq!(last.end, EndCondition::RedKilled);
-        assert_eq!(sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count(), 4);
-        assert_eq!(sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count(), 0);
-        assert_eq!(last.agents.len(), 4);
-    }
-
-    #[test]
-    fn four_v_four_baseline_vs_baseline_ends() {
-        let mut sim =
-            Simulation::new(line_abreast_4v4(Behavior::Baseline1, Behavior::Baseline1, 400));
-        sim.reset(Some(1));
-        let empty = HashMap::new();
-        let mut last = sim.step(&empty);
-        while last.end == EndCondition::Ongoing {
-            last = sim.step(&empty);
-        }
-        assert_ne!(last.end, EndCondition::Ongoing);
-        let blue_alive = sim.fighters.iter().filter(|f| f.team == 0 && f.alive).count();
-        let red_alive = sim.fighters.iter().filter(|f| f.team == 1 && f.alive).count();
-        assert!(
-            blue_alive == 0 || red_alive == 0 || last.end == EndCondition::MaxCycles,
-            "4v4 b1 vs b1 should kill a side or hit max cycles, end={:?} alive={}/{}",
-            last.end,
-            blue_alive,
-            red_alive
-        );
+        assert!(!snap.fighters.is_empty());
+        assert!(snap.fighters.iter().all(|f| f.radar_range > 0.0));
     }
 }

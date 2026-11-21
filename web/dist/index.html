@@ -37,6 +37,7 @@
         <aside class="panel">
           <h2>Parallel jobs</h2>
           <label>Envs <input id="num-envs" type="number" min="1" max="32" value="4" /></label>
+          <label>Agents / side <input id="num-agents" type="number" min="1" max="4" value="1" /></label>
           <label>Max cycles <input id="max-cycles" type="number" min="10" value="200" /></label>
           <button id="start-job" class="cta">Start simulation</button>
           <ul id="job-list"></ul>
@@ -105,50 +106,26 @@
       <section id="view-experiment" class="view hidden">
         <aside class="panel">
           <h2>Batch experiment</h2>
-          <p class="hint">Sweeps blue <code>d_shot</code> from 0.70 by +0.01 per case.</p>
-          <label>Cases <input id="exp-cases" type="number" min="1" max="128" value="16" /></label>
+          <label>Recipe
+            <select id="exp-recipe">
+              <option value="wez">WEZ validation</option>
+              <option value="fsm">FSM search</option>
+            </select>
+          </label>
+          <label id="exp-cases-label">Repeats / pop <input id="exp-cases" type="number" min="1" max="32" value="4" /></label>
           <label>Max cycles <input id="exp-cycles" type="number" min="20" value="150" /></label>
-          <label>Blue
-            <select id="exp-blue">
-              <option value="baseline1" selected>baseline1</option>
-              <option value="duck">duck</option>
-            </select>
-          </label>
-          <label>Red
-            <select id="exp-red">
-              <option value="duck" selected>duck</option>
-              <option value="baseline1">baseline1</option>
-            </select>
-          </label>
+          <label id="exp-gen-row" class="hidden">Generations <input id="exp-gens" type="number" min="1" max="30" value="5" /></label>
           <button id="run-exp" class="cta">Run experiment</button>
+          <p id="exp-summary" class="meta"></p>
         </aside>
         <div class="stage exp-stage">
-          <div id="exp-summary" class="cards"></div>
-          <div class="exp-grid">
-            <div>
-              <h3>Outcomes</h3>
-              <div id="exp-bars" class="bars"></div>
-            </div>
-            <div>
-              <h3>d_shot vs steps</h3>
-              <svg id="exp-scatter" viewBox="0 0 320 180" preserveAspectRatio="xMidYMid meet"></svg>
-            </div>
-          </div>
           <div class="table-wrap">
             <table id="exp-table">
-              <thead>
-                <tr>
-                  <th data-sort="seed">seed</th>
-                  <th data-sort="d_shot">d_shot</th>
-                  <th data-sort="end">end</th>
-                  <th data-sort="steps">steps</th>
-                  <th data-sort="blue_alive">blue</th>
-                  <th data-sort="red_alive">red</th>
-                </tr>
-              </thead>
+              <thead></thead>
               <tbody></tbody>
             </table>
           </div>
+          <pre id="exp-out" class="inspect"></pre>
         </div>
       </section>
     </main>
