@@ -1,0 +1,27 @@
+{
+  "description": "Long shots at 75% of Rmax to force the enemy defensive early, cranks as soon as threatened and breaks before the enemy's no-escape zone. Reference profile built from openly described BVR principles (shot range as a fraction of Rmax, crank to support, defend on missile warning, stay out of the enemy's no-escape zone); see docs/PUBLIC_REFERENCES.md.",
+  "env": {
+    "max_cycles": 700,
+    "seed": 1
+  },
+  "blue": {
+    "num_agents": 1,
+    "behavior": "external"
+  },
+  "red": {
+    "num_agents": 1,
+    "behavior": "baseline1",
+    "beh_noise": 0.1,
+    "beh_config": {
+      "d_shot": [
+        0.75
+      ],
+      "l_crank": [
+        1.2
+      ],
+      "l_break": [
+        1.9
+      ]
+    }
+  }
+}

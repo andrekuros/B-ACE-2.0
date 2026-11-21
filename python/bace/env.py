@@ -152,10 +152,10 @@ def _action_payload(v: np.ndarray | list[float] | list[int]) -> list[float]:
     return arr.astype(np.float64).tolist()
 
 
-def _baseline_beh(name: str) -> dict[str, Any]:
+def _baseline_beh(name: str, folder: str = "baselines") -> dict[str, Any]:
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[2] / "configs" / "baselines" / f"{name}.json"
+    root = Path(__file__).resolve().parents[2] / "configs" / folder / f"{name}.json"
     if root.is_file():
         import json as _json
 
@@ -165,10 +165,15 @@ def _baseline_beh(name: str) -> dict[str, Any]:
         "aggressive": {"d_shot": [1.2], "l_crank": [0.5], "l_break": [1.3]},
         "balanced": {"d_shot": [0.85], "l_crank": [0.6], "l_break": [0.95]},
         "cautious": {"d_shot": [0.55], "l_crank": [0.9], "l_break": [0.7]},
+        # Reference profiles (configs/reference), mirrored here for wheel installs.
+        "ref_aggressive": {"d_shot": [0.4], "l_crank": [1.5], "l_break": [2.0]},
+        "ref_balanced": {"d_shot": [0.6], "l_crank": [1.5], "l_break": [2.0]},
+        "ref_conservative": {"d_shot": [0.75], "l_crank": [1.2], "l_break": [1.9]},
     }
+    key = f"ref_{name}" if folder == "reference" else name
     return {
         "behavior": "baseline1",
-        "beh_config": defaults.get(name, defaults["balanced"]),
+        "beh_config": defaults.get(key, defaults["balanced"]),
     }
 
 
@@ -229,7 +234,12 @@ def make_env(
     self_play: bool = False,
     **kwargs: Any,
 ) -> BaceEnv:
-    """PettingZoo factory. Caps at 4v4. `self_play` makes red `external` too (equal team size)."""
+    """PettingZoo factory. Caps at 4v4. `self_play` makes red `external` too (equal team size).
+
+    `opponent`: ``duck``, ``baseline`` (paper FSM-B1 thresholds), the searched profiles
+    ``aggressive`` / ``balanced`` / ``cautious`` (``configs/baselines``), or the reference
+    profiles ``ref_aggressive`` / ``ref_balanced`` / ``ref_conservative`` (``configs/reference``).
+    """
     agents = _clamp_agents(agents)
     form = _formation(agents)
     opp = opponent.lower()
@@ -239,6 +249,10 @@ def make_env(
         red: dict[str, Any] = {"num_agents": agents, "behavior": "duck", **form}
     elif opp == "baseline":
         red = {"num_agents": agents, "behavior": "baseline1", **form}
+    elif opp in {"ref_aggressive", "ref_balanced", "ref_conservative"}:
+        red = {"num_agents": agents, **_baseline_beh(opp[4:], folder="reference"), **form}
+        red["behavior"] = "baseline1"
+        red["num_agents"] = agents
     elif opp in {"aggressive", "balanced", "cautious", "fsm", "elite"}:
         label = "balanced" if opp in {"fsm", "elite"} else opp
         red = {"num_agents": agents, **_baseline_beh(label), **form}

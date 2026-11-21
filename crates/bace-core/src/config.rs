@@ -1,5 +1,6 @@
 //! Typed scenario configuration for B-ACE 2.0.
 
+pub use crate::missile::MissileModel;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,34 @@ impl Default for Mission {
     fn default() -> Self {
         Self::Dca
     }
+}
+
+/// Aircraft speed model (`env.aircraft_model`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AircraftModel {
+    /// Point-mass energy: speed recovers toward the altitude's maximum, bleeds with
+    /// load factor (induced drag) and trades with climb.
+    #[default]
+    Energy,
+    /// B-ACE 2.0: constant speed for the altitude; manoeuvring is free.
+    ConstantSpeed,
+}
+
+/// How missile datalink guidance depends on the shooter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MissileSupport {
+    /// The missile receives perfect target updates from launch until its seeker goes
+    /// active (or the shooter fires another missile), whatever the shooter does.
+    /// B-ACE 2.0 behaviour.
+    Launch,
+    /// Datalink updates only while the shooter is alive and tracks the target (radar or
+    /// shared datalink); regained when the track returns. Unsupported, the generic
+    /// missile flies inertially to the last predicted point and can still acquire with
+    /// its seeker; the legacy missile flies straight and cannot go active (B-ACE 1.0).
+    #[default]
+    Track,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,11 +94,11 @@ impl Default for Vec3Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BehConfig {
-    /// Shoot when range_ratio <= d_shot (range / RMax).
+    /// Shoot when range_ratio <= d_shot (range / RMax). The turn-in starts at 1.15 x d_shot.
     pub d_shot: Vec<f64>,
-    /// Crank when offensive_factor <= l_crank.
+    /// Crank when the threat factor of the target exceeds l_crank (B-ACE 1.0 semantics).
     pub l_crank: Vec<f64>,
-    /// Break when threat_factor >= l_break.
+    /// Break (turn away, held 8 s) when threat_factor >= l_break (+0.5 while supporting a missile).
     pub l_break: Vec<f64>,
 }
 
@@ -96,6 +125,10 @@ pub struct TeamConfig {
     pub init_hdg: f64,
     pub target_position: Vec3Config,
     pub rnd_offset_range: Vec3Config,
+    /// Relative jitter applied to scripted FSM thresholds (`d_shot`, `l_crank`,
+    /// `l_break`) at every decision, drawn uniformly from `[-beh_noise, beh_noise]`.
+    /// `0.0` (default) keeps scripted agents fully deterministic.
+    pub beh_noise: f64,
 }
 
 impl TeamConfig {
@@ -145,6 +178,7 @@ impl Default for TeamConfig {
                 y: 0.0,
                 z: 0.0,
             },
+            beh_noise: 0.0,
         }
     }
 }
@@ -207,6 +241,12 @@ pub struct EnvConfig {
     pub stop_mission: bool,
     pub seed: u64,
     pub rewards: RewardsConfig,
+    /// Missile datalink model (see [`MissileSupport`]).
+    pub missile_support: MissileSupport,
+    /// Missile physics (see [`MissileModel`]).
+    pub missile_model: MissileModel,
+    /// Aircraft speed model (see [`AircraftModel`]).
+    pub aircraft_model: AircraftModel,
 }
 
 impl Default for EnvConfig {
@@ -220,6 +260,9 @@ impl Default for EnvConfig {
             stop_mission: true,
             seed: 1,
             rewards: RewardsConfig::default(),
+            missile_support: MissileSupport::default(),
+            missile_model: MissileModel::default(),
+            aircraft_model: AircraftModel::default(),
         }
     }
 }
@@ -262,10 +305,26 @@ impl ScenarioConfig {
     /// Deep-merge overrides from a partial JSON object.
     pub fn merge_json(&mut self, partial: &str) -> Result<(), serde_json::Error> {
         let patch: serde_json::Value = serde_json::from_str(partial)?;
+        self.merge_value(&patch)
+    }
+
+    /// Deep-merge overrides from a partial JSON value.
+    pub fn merge_value(&mut self, patch: &serde_json::Value) -> Result<(), serde_json::Error> {
         let mut base = serde_json::to_value(&*self)?;
-        merge_values(&mut base, &patch);
+        merge_values(&mut base, patch);
         *self = serde_json::from_value(base)?;
         Ok(())
+    }
+
+    /// Build a scenario from a partial JSON value merged over [`ScenarioConfig::default`].
+    ///
+    /// Prefer this over `serde_json::from_value` for user input: plain
+    /// deserialization fills a missing `red` field from `TeamConfig::default()`,
+    /// which is the *blue* spawn point, so red would start on top of blue.
+    pub fn from_partial_value(patch: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        let mut c = Self::default();
+        c.merge_value(patch)?;
+        Ok(c)
     }
 }
 
@@ -292,6 +351,18 @@ mod tests {
         let c2 = ScenarioConfig::from_json(&s).unwrap();
         assert_eq!(c2.blue.num_agents, 1);
         assert_eq!(c2.env.phy_fps, 20);
+    }
+
+    #[test]
+    fn partial_red_keeps_red_side_defaults() {
+        let v = serde_json::json!({"red": {"behavior": "duck"}});
+        let c = ScenarioConfig::from_partial_value(&v).unwrap();
+        assert!(
+            (c.red.init_position.z + 30.0).abs() < 1e-9,
+            "red must spawn north"
+        );
+        assert!((c.red.init_hdg - 180.0).abs() < 1e-9);
+        assert_eq!(c.red.behavior, Behavior::Duck);
     }
 
     #[test]

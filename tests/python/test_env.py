@@ -188,3 +188,26 @@ def test_sp_mode_sets_self_play():
     assert ev.self_play is False
     assert ev.opponent == "duck"
     assert ev.sp_mode == ""
+
+
+def test_reference_opponents_load():
+    from bace import make_env
+
+    for name in ("ref_aggressive", "ref_balanced", "ref_conservative"):
+        env = make_env(opponent=name, max_cycles=5)
+        cfg = __import__("json").loads(env._native.config_json())
+        assert cfg["red"]["behavior"] == "baseline1"
+        assert cfg["env"]["missile_model"] == "generic_mraam"
+        assert cfg["env"]["missile_support"] == "track"
+
+
+def test_reference_profiles_match_python_fallbacks():
+    import json
+    from pathlib import Path
+
+    from bace.env import _baseline_beh
+
+    root = Path(__file__).resolve().parents[2] / "configs" / "reference"
+    for name in ("aggressive", "balanced", "conservative"):
+        stored = json.loads((root / f"{name}.json").read_text())["red"]["beh_config"]
+        assert _baseline_beh(name, folder="reference")["beh_config"] == stored

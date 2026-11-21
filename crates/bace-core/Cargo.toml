@@ -8,9 +8,9 @@ description = "B-ACE 2.0 BVR air-combat simulation core"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-rand = { workspace = true }
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }
 thiserror = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 approx = "0.5"
+rayon = { workspace = true }

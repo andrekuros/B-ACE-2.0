@@ -1,0 +1,27 @@
+{
+  "description": "Presses toward the no-escape zone for high-probability shots (fires at 40% of Rmax), cranks once well inside the enemy envelope and breaks only inside its no-escape zone or when an active missile is tracking it. Reference profile built from openly described BVR principles (shot range as a fraction of Rmax, crank to support, defend on missile warning, stay out of the enemy's no-escape zone); see docs/PUBLIC_REFERENCES.md.",
+  "env": {
+    "max_cycles": 700,
+    "seed": 1
+  },
+  "blue": {
+    "num_agents": 1,
+    "behavior": "external"
+  },
+  "red": {
+    "num_agents": 1,
+    "behavior": "baseline1",
+    "beh_noise": 0.1,
+    "beh_config": {
+      "d_shot": [
+        0.4
+      ],
+      "l_crank": [
+        1.5
+      ],
+      "l_break": [
+        2.0
+      ]
+    }
+  }
+}

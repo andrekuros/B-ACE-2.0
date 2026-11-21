@@ -99,6 +99,69 @@ export class CombatScene {
     this._raf = requestAnimationFrame(this._loop);
   }
 
+  _lights() {
+    this.scene.add(new THREE.HemisphereLight(0x8eb0c8, 0x1a2a22, 0.85));
+    const sun = new THREE.DirectionalLight(0xf2efe6, 1.35);
+    sun.position.set(400, 720, 180);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.camera.near = 80;
+    sun.shadow.camera.far = 2000;
+    sun.shadow.camera.left = -400;
+    sun.shadow.camera.right = 400;
+    sun.shadow.camera.top = 400;
+    sun.shadow.camera.bottom = -400;
+    this.scene.add(sun);
+    const fill = new THREE.DirectionalLight(0x4aa3ff, 0.22);
+    fill.position.set(-300, 120, -200);
+    this.scene.add(fill);
+  }
+
+  _theater() {
+    const sea = new THREE.Mesh(
+      new THREE.CircleGeometry(90 * NM, 72),
+      new THREE.MeshStandardMaterial({
+        color: 0x10202c,
+        metalness: 0.35,
+        roughness: 0.72,
+      })
+    );
+    sea.rotation.x = -Math.PI / 2;
+    sea.receiveShadow = true;
+    this.scene.add(sea);
+
+    const grid = new THREE.GridHelper(80 * NM, 16, 0x2a4254, 0x173040);
+    grid.position.y = 0.4;
+    grid.material.transparent = true;
+    grid.material.opacity = 0.45;
+    this.scene.add(grid);
+
+    const ringMat = new THREE.LineBasicMaterial({ color: 0x3d5c72, transparent: true, opacity: 0.55 });
+    for (const nm of [10, 20, 30, 40, 50, 60]) {
+      const pts = [];
+      for (let i = 0; i <= 96; i++) {
+        const a = (i / 96) * Math.PI * 2;
+        pts.push(new THREE.Vector3(Math.sin(a) * nm * NM, 0.8, Math.cos(a) * nm * NM));
+      }
+      this.scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), ringMat));
+    }
+
+    const axis = new THREE.Group();
+    const mk = (from, to, color) => {
+      const g = new THREE.BufferGeometry().setFromPoints([from, to]);
+      return new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.5 }));
+    };
+    axis.add(mk(new THREE.Vector3(-70 * NM, 1, 0), new THREE.Vector3(70 * NM, 1, 0), 0x4aa3ff));
+    axis.add(mk(new THREE.Vector3(0, 1, -70 * NM), new THREE.Vector3(0, 1, 70 * NM), 0xff6b5a));
+    this.scene.add(axis);
+
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(3500, 24, 16),
+      new THREE.MeshBasicMaterial({ color: 0x12202c, side: THREE.BackSide })
+    );
+    this.scene.add(sky);
+  }
+
   simToWorld(pos) {
     return new THREE.Vector3(pos[0], pos[1] * this.config.altScale, pos[2]);
   }

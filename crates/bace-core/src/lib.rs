@@ -3,6 +3,7 @@
 //! Redesigned BVR air-combat environment with kinematic fighters,
 //! WEZ-based missiles, geometric radar, and FSM baselines.
 
+pub mod atmosphere;
 pub mod config;
 pub mod fighter;
 pub mod geometry;
@@ -14,11 +15,13 @@ pub mod units;
 pub mod wez;
 
 pub use config::{
-    ActionType, Behavior, EnvConfig, Mission, RewardsConfig, ScenarioConfig, TeamConfig,
+    ActionType, AircraftModel, Behavior, EnvConfig, MissileModel, MissileSupport, Mission,
+    RewardsConfig, ScenarioConfig, TeamConfig,
 };
 pub use obs::{Action, AllyObs, DiscreteAction, EnemyObs, OwnObs, StructuredObs};
 pub use rewards::RewardBreakdown;
 pub use sim::{
-    AgentId, EndCondition, EpisodeOutcome, SimSnapshot, Simulation, StepResult, Team,
+    AgentId, EndCondition, EpisodeOutcome, EventKind, SimEvent, SimSnapshot, Simulation,
+    StepResult, Team,
 };
 pub use units::SConv;

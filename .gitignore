@@ -32,3 +32,7 @@ runs/
 /dist/
 *.so
 python/bace/_native*.so
+
+# B-ACE Lab (browser)
+web/dist/engine/bace.wasm
+tests/web/node_modules/

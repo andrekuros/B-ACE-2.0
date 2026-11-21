@@ -40,6 +40,28 @@ impl WezAspect {
             Self::Tail => 0.0,
         }
     }
+
+    /// Target aspect (target nose vs its line of sight to the shooter).
+    fn target_aspect_deg(self) -> f64 {
+        match self {
+            Self::Head => 0.0,
+            Self::Beam => 90.0,
+            Self::Tail => 180.0,
+        }
+    }
+
+    /// WEZ the agents observe for this recipe geometry (target on the nose, co-altitude).
+    pub fn observed_wez(self, model: bace_core::MissileModel, alt_ft: f64) -> wez::WezRanges {
+        let alt = alt_ft * SConv::FT2GDM;
+        wez::evaluate_model(
+            model,
+            alt,
+            alt,
+            0.0,
+            self.target_aspect_deg(),
+            self.angle_off_deg(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +73,8 @@ pub struct WezParams {
     pub repeats: usize,
     pub max_cycles: u32,
     pub seed: u64,
+    /// Missile physics to characterise.
+    pub missile_model: bace_core::MissileModel,
 }
 
 impl Default for WezParams {
@@ -62,6 +86,7 @@ impl Default for WezParams {
             repeats: 4,
             max_cycles: 150,
             seed: 1,
+            missile_model: bace_core::MissileModel::default(),
         }
     }
 }
@@ -75,6 +100,7 @@ impl WezParams {
             repeats: 2,
             max_cycles: 80,
             seed: 1,
+            missile_model: bace_core::MissileModel::default(),
         }
     }
 
@@ -86,6 +112,7 @@ impl WezParams {
             repeats: 30,
             max_cycles: 150,
             seed: 1,
+            missile_model: bace_core::MissileModel::default(),
         }
     }
 }
@@ -149,13 +176,15 @@ pub fn build_wez_cases(params: &WezParams) -> Vec<ScenarioConfig> {
         for aspect in &params.aspects {
             for &range in &params.ranges_nm {
                 for _ in 0..params.repeats.max(1) {
-                    cases.push(wez_case(
+                    let mut c = wez_case(
                         range,
                         alt,
                         *aspect,
                         params.seed.wrapping_add(i),
                         params.max_cycles,
-                    ));
+                    );
+                    c.env.missile_model = params.missile_model;
+                    cases.push(c);
                     i += 1;
                 }
             }
@@ -195,27 +224,41 @@ pub struct WezReport {
     pub outcomes: Vec<EpisodeOutcome>,
 }
 
+/// Outer 50% hit range: where the hit rate last drops below 0.5 going outward.
+/// Misses at short range (minimum-range effects) do not pull it in.
 fn interpolate_p50(ranges: &[(f64, f64)]) -> f64 {
     if ranges.is_empty() {
         return 0.0;
     }
     let mut sorted = ranges.to_vec();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    if sorted[0].1 < 0.5 {
+    let Some(last_ok) = sorted.iter().rposition(|&(_, h)| h >= 0.5) else {
         return sorted[0].0;
+    };
+    if last_ok + 1 == sorted.len() {
+        return sorted[last_ok].0;
     }
-    if sorted.last().unwrap().1 >= 0.5 {
-        return sorted.last().unwrap().0;
+    let (r0, h0) = sorted[last_ok];
+    let (r1, h1) = sorted[last_ok + 1];
+    let t = (h0 - 0.5) / (h0 - h1 + 1e-9);
+    r0 + t * (r1 - r0)
+}
+
+#[cfg(test)]
+mod p50_tests {
+    #[test]
+    fn ignores_minimum_range_misses() {
+        let curve = [
+            (4.0, 0.0),
+            (8.0, 1.0),
+            (20.0, 1.0),
+            (32.0, 1.0),
+            (36.0, 0.0),
+        ];
+        assert!((super::interpolate_p50(&curve) - 34.0).abs() < 1e-6);
+        assert_eq!(super::interpolate_p50(&[(10.0, 1.0), (20.0, 1.0)]), 20.0);
+        assert_eq!(super::interpolate_p50(&[(10.0, 0.0), (20.0, 0.0)]), 10.0);
     }
-    for w in sorted.windows(2) {
-        let (r0, h0) = w[0];
-        let (r1, h1) = w[1];
-        if h0 >= 0.5 && h1 < 0.5 {
-            let t = (h0 - 0.5) / (h0 - h1 + 1e-9);
-            return r0 + t * (r1 - r0);
-        }
-    }
-    sorted.last().unwrap().0
 }
 
 pub fn summarize_wez(params: &WezParams, outcomes: Vec<EpisodeOutcome>) -> WezReport {
@@ -226,22 +269,18 @@ pub fn summarize_wez(params: &WezParams, outcomes: Vec<EpisodeOutcome>) -> WezRe
                 let hits = outcomes
                     .iter()
                     .filter(|o| {
-                        cell_from_outcome(o).map(|(r, a, asp)| {
-                            (r - range).abs() < 0.1
-                                && (a - alt).abs() < 1.0
-                                && asp == *aspect
-                        })
-                        .unwrap_or(false)
+                        cell_from_outcome(o)
+                            .map(|(r, a, asp)| {
+                                (r - range).abs() < 0.1 && (a - alt).abs() < 1.0 && asp == *aspect
+                            })
+                            .unwrap_or(false)
                     })
                     .collect::<Vec<_>>();
                 let n = hits.len();
                 let nhit = hits.iter().filter(|o| o.missile_hits > 0).count();
                 let fired = hits.iter().filter(|o| o.missiles_fired > 0).count();
-                let alt_gdm = alt * SConv::FT2GDM;
-                // Recipe geometry: target on the nose, angle-off = red heading
-                // (head 180 / beam 90 / tail 0). Same args as the live FSM call
-                // after the closing-speed WEZ rewrite.
-                let wez = wez::evaluate(alt_gdm, 0.0, aspect.angle_off_deg());
+                // Recipe geometry: target on the nose, co-altitude.
+                let wez = aspect.observed_wez(params.missile_model, alt);
                 cells.push(WezCell {
                     range_nm: range,
                     altitude_ft: alt,
@@ -265,8 +304,7 @@ pub fn summarize_wez(params: &WezParams, outcomes: Vec<EpisodeOutcome>) -> WezRe
                 .filter(|c| (c.altitude_ft - alt).abs() < 1.0 && c.aspect == aspect.as_str())
                 .map(|c| (c.range_nm, c.hit_rate))
                 .collect();
-            let alt_gdm = alt * SConv::FT2GDM;
-            let wez = wez::evaluate(alt_gdm, 0.0, aspect.angle_off_deg());
+            let wez = aspect.observed_wez(params.missile_model, alt);
             aspect_summaries.push(WezAspectSummary {
                 aspect: aspect.as_str().to_string(),
                 altitude_ft: alt,
@@ -346,6 +384,12 @@ pub struct FsmParams {
     pub num_agents: usize,
     pub eval_agents: usize,
     pub pool_interval: usize,
+    /// FSM decision noise for every evaluated episode (0 = deterministic, as before).
+    #[serde(default)]
+    pub beh_noise: f64,
+    /// Uniform spawn jitter in NM (x, and half of it in z). 0 = fixed spawns, as before.
+    #[serde(default)]
+    pub spawn_jitter_nm: f64,
 }
 
 impl Default for FsmParams {
@@ -359,6 +403,8 @@ impl Default for FsmParams {
             num_agents: 2,
             eval_agents: 0,
             pool_interval: 3,
+            beh_noise: 0.0,
+            spawn_jitter_nm: 0.0,
         }
     }
 }
@@ -374,6 +420,8 @@ impl FsmParams {
             num_agents: 1,
             eval_agents: 0,
             pool_interval: 3,
+            beh_noise: 0.0,
+            spawn_jitter_nm: 0.0,
         }
     }
 
@@ -387,6 +435,8 @@ impl FsmParams {
             num_agents: 2,
             eval_agents: 4,
             pool_interval: 3,
+            beh_noise: 0.0,
+            spawn_jitter_nm: 0.0,
         }
     }
 }
@@ -422,6 +472,11 @@ fn fsm_case(
     cfg.red.num_agents = num_agents.clamp(1, TeamConfig::MAX_AGENTS);
     apply_genome(&mut cfg.red, red);
     cfg.red.apply_box_formation();
+    for t in [&mut cfg.blue, &mut cfg.red] {
+        t.beh_noise = params.beh_noise;
+        t.rnd_offset_range.x = params.spawn_jitter_nm;
+        t.rnd_offset_range.z = params.spawn_jitter_nm / 2.0;
+    }
     cfg
 }
 
@@ -518,9 +573,7 @@ fn eval_genomes(
     let mut cases = Vec::new();
     for (i, g) in genomes.iter().enumerate() {
         for e in 0..params.episodes.max(1) {
-            let s = seed
-                .wrapping_add((i as u64) * 100)
-                .wrapping_add(e as u64);
+            let s = seed.wrapping_add((i as u64) * 100).wrapping_add(e as u64);
             // Even episodes always vs default red so train fitness cannot ignore the test set.
             let red = if e % 2 == 0 {
                 &def
@@ -635,10 +688,7 @@ pub fn run_fsm_search(params: FsmParams, max_parallel: usize) -> FsmReport {
             max_parallel,
             n_agents,
         );
-        let train_best_frozen = frozen
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| last[0].clone());
+        let train_best_frozen = frozen.into_iter().next().unwrap_or_else(|| last[0].clone());
         let accepted = match &archive {
             None => true,
             Some(cur) => train_best_frozen.fitness > cur.fitness,
@@ -865,6 +915,7 @@ mod tests {
             num_agents: 1,
             eval_agents: 0,
             pool_interval: 2,
+            ..FsmParams::default()
         };
         let report = run_fsm_search(params, 4);
         assert_eq!(report.history.len(), 4);
@@ -876,7 +927,10 @@ mod tests {
                 w[1].frozen_fitness
             );
         }
-        assert!(report.history.last().unwrap().frozen_fitness + 1e-9 >= report.history[0].frozen_fitness);
+        assert!(
+            report.history.last().unwrap().frozen_fitness + 1e-9
+                >= report.history[0].frozen_fitness
+        );
     }
 
     #[test]
