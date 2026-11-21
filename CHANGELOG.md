@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Studies and learning
+- **Shot log**: `EpisodeOutcome.shots` records every missile of both teams (range, Rmax/Rnez at
+  launch, altitudes, target aspect, A-pole, F-pole, time of flight, result).
+- `env.missile_warning` switch (default `true`) for ablations.
+- `bace.studies`: the paper's scripted studies (missile, WEZ validation, cross-play, physics
+  ablation, tactics landscape, defend baselines, benchmark, learned-policy evaluation).
+- `bace.ppo`: lean independent PPO on the Rust vector env with mixed opponents, checkpoints
+  and validation-based checkpoint selection (~12k decisions/s on two CPU threads).
+- `bace.env.red_config`: one opponent mapping shared by `make_env` and scripted evaluation
+  (scripted baselines in `bace.marl` now face the requested reference pilot).
+- `bace.marl.train` returns the trained actor; `load_actor` rebuilds an act function.
+- `examples/missile_traces.rs`: fly-out traces as JSON.
+
 ### Physics built from open sources (see `docs/PUBLIC_REFERENCES.md`)
 - **Generic medium-range missile** (`env.missile_model = "generic_mraam"`, default): 3-D point
   mass with boost–sustain motor and mass loss, Mach-dependent drag plus induced drag,

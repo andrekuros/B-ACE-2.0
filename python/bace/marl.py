@@ -191,13 +191,15 @@ def eval_scripted(
     form: dict[str, Any] = {}
     if agents >= 2:
         form = {"offset_pos": {"x": 4.0, "y": 0.0, "z": 0.0 if agents == 2 else 4.0}}
-    red_beh = "duck" if opponent == "duck" else "baseline1"
+    from bace.env import red_config
+
+    red = red_config(opponent, agents)
     configs = []
     for i in range(max(1, n)):
         cfg: dict[str, Any] = {
             "env": _rl_env_block(max_cycles, seed + i),
             "blue": {"num_agents": agents, "behavior": behavior, **form},
-            "red": {"num_agents": agents, "behavior": red_beh, **form},
+            "red": {**red, **form},
         }
         if spawn:
             from bace.env import _deep_merge
@@ -934,6 +936,12 @@ def train_ippo(spec: TrainSpec) -> dict[str, Any]:
             "team_concat": team_concat,
         },
         "trainer": str(type(result)),
+        "actor": {
+            "state_dict": _clone_sd(actor),
+            "actor_shape": list(actor_shape),
+            "own_dim": int(own_dim),
+            "team_concat": bool(team_concat),
+        },
         **packed,
     }
 
@@ -1191,6 +1199,31 @@ def train_ppo(spec: TrainSpec) -> dict[str, Any]:
 def train_benchmarl(spec: TrainSpec) -> dict[str, Any]:
     """CLI compatibility. Trains IPPO/MAPPO/MADDPG on Tianshou, not BenchMARL."""
     return train(spec)
+
+
+def load_actor(meta: dict[str, Any]) -> Callable[[np.ndarray], np.ndarray]:
+    """Greedy act function from ``train(...)["actor"]`` (or a ``torch.save`` of it)."""
+    import torch
+    from tianshou.utils.net.common import Net
+
+    hidden = list(_HYPER["hidden"])
+    actor = _factored_discrete_actor_cls()(
+        preprocess_net=Net(state_shape=tuple(meta["actor_shape"]), hidden_sizes=hidden),
+        fire_logit_bias=float(_HYPER["fire_logit_bias"]),
+        own_dim=int(meta["own_dim"]) if meta.get("team_concat") else None,
+    )
+    actor.load_state_dict(meta["state_dict"])
+    actor.eval()
+
+    def act(obs: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            o = torch.as_tensor(np.asarray(obs, dtype=np.float32))
+            if o.ndim == 1:
+                o = o.unsqueeze(0)
+            probs, _ = actor(o)
+            return greedy_from_probs(probs.reshape(-1).cpu().numpy())
+
+    return act
 
 
 def _strip_actor(rep: dict[str, Any]) -> dict[str, Any]:

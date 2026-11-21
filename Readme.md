@@ -69,6 +69,29 @@ while env.agents:
 
 Web tests: `cd tests/web && npm ci && npx playwright install chromium && npm test`.
 
+## Paper studies
+
+Every number in the paper comes from two commands (minutes for the scripted studies on a
+laptop, about six minutes per PPO run on two CPU threads):
+
+```bash
+python -m bace.studies all --out runs/paper      # missile, wez, crossplay, ablation, landscape, defend, bench
+python -m bace.ppo --agents 1 --seed 0 --steps 4000000 --out runs/paper/rl/ippo_1v1_s0
+python -c "from pathlib import Path; from bace.ppo import select_checkpoint; select_checkpoint(Path('runs/paper/rl/ippo_1v1_s0'))"
+python -m bace.studies rl_eval --policies runs/paper/rl/*/best.pt --out runs/paper
+```
+
+- `bace.studies`: scripted pilots in the *duel* (DCA vs DCA) and *defend* (DCA vs strikers)
+  scenarios, physics ablations, a shot-range × break-threshold landscape, and evaluation
+  of learned policies. Each writes `runs/paper/<study>.json` with 95% bootstrap CIs and the
+  raw shot log.
+- `bace.ppo`: a lean, dependency-light PPO (torch only) on the Rust vector env: factored
+  action heads, observation normalisation, a mix of opponents per update, checkpoints and
+  checkpoint selection on validation seeds. ~12k decisions/s on two CPU threads.
+- Every episode outcome carries a **shot log** (`outcome["shots"]`): launch range, the
+  shooter's `Rmax`/`Rnez` at launch, altitudes, target aspect, A-pole, F-pole, time of
+  flight and result for every missile of both teams.
+
 ## Demo path (framework release)
 
 0. `cargo test -p bace-core -p bace-vec` and `pytest -q tests/python`, then `python -m bace.examples.random_policy`
@@ -100,6 +123,10 @@ Continuous actions are `[d_heading, d_altitude, g_force, fire]` in `[-1, 1]`.
 Set `"action_type": "discrete"` for `MultiDiscrete([2, 5, 5])` (fire, level, turn).
 
 Behaviors: `external` (RL, blue and red), `baseline1` (FSM), `duck`, `fire_once`.
+
+Physics switches under `env`: `missile_model` (`generic_mraam` | `legacy`), `missile_support`
+(`track` | `launch`), `aircraft_model` (`energy` | `constant_speed`), `missile_warning`
+(`true` | `false`).
 
 Batch experiments:
 

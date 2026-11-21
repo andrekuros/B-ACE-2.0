@@ -181,6 +181,34 @@ pub struct SimSnapshot {
     pub missiles: Vec<MissileSnapshot>,
 }
 
+/// One missile from launch to its end: the shot log used for tactics analysis.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShotRecord {
+    pub missile: u32,
+    /// 0 = blue, 1 = red.
+    pub team: u8,
+    pub shooter: u32,
+    pub target: u32,
+    /// Launch time, s.
+    pub t: f64,
+    pub range_nm: f64,
+    /// Shooter's WEZ against the target at launch, NM.
+    pub rmax_nm: f64,
+    pub rnez_nm: f64,
+    pub shooter_alt_ft: f64,
+    pub target_alt_ft: f64,
+    /// Target aspect seen from the shooter (0 = target hot), deg.
+    pub target_aspect_deg: f64,
+    pub shooter_speed_kt: f64,
+    /// Shooter-to-target range when the seeker went active, NM (0 = never).
+    pub a_pole_nm: f64,
+    /// Shooter-to-target range at the end (0 if the shooter was dead).
+    pub f_pole_nm: f64,
+    pub tof_s: f64,
+    /// "hit", a miss cause, or "in_flight" when the episode ended first.
+    pub result: String,
+}
+
 /// Compact end-of-episode metrics for experiment mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodeOutcome {
@@ -207,6 +235,9 @@ pub struct EpisodeOutcome {
     pub mean_ally_spacing_nm: f64,
     pub mean_fire_range_nm: f64,
     pub tracks_on_frac: f64,
+    /// Every missile of both teams.
+    #[serde(default)]
+    pub shots: Vec<ShotRecord>,
 }
 
 pub struct Simulation {
@@ -237,6 +268,7 @@ pub struct Simulation {
     tracks_on_sum: f64,
     tracks_on_n: u32,
     events: Vec<SimEvent>,
+    shots: Vec<ShotRecord>,
 }
 
 impl Simulation {
@@ -272,6 +304,7 @@ impl Simulation {
             tracks_on_sum: 0.0,
             tracks_on_n: 0,
             events: Vec::new(),
+            shots: Vec::new(),
         };
         sim.spawn_teams();
         sim
@@ -430,6 +463,34 @@ impl Simulation {
             }
             _ => 0.0,
         };
+        if let Some(mid) = missile {
+            match kind {
+                EventKind::Launch => self.log_launch(actor, target, mid, value),
+                EventKind::Pitbull | EventKind::Hit | EventKind::Miss => {
+                    let t_now = self.time_s();
+                    if let Some(r) = self.shots.iter_mut().find(|r| r.missile == mid) {
+                        match kind {
+                            EventKind::Pitbull => r.a_pole_nm = pole_nm,
+                            EventKind::Hit => {
+                                r.f_pole_nm = pole_nm;
+                                r.tof_s = t_now - r.t;
+                                r.result = "hit".into();
+                            }
+                            _ => {
+                                r.f_pole_nm = pole_nm;
+                                r.tof_s = t_now - r.t;
+                                r.result = if detail.is_empty() {
+                                    "miss".into()
+                                } else {
+                                    detail.to_string()
+                                };
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         self.events.push(SimEvent {
             t: self.time_s(),
             step: self.action_step,
@@ -480,6 +541,7 @@ impl Simulation {
         self.tracks_on_sum = 0.0;
         self.tracks_on_n = 0;
         self.events.clear();
+        self.shots.clear();
         self.spawn_teams();
         self.sense_and_observe(true)
     }
@@ -570,6 +632,12 @@ impl Simulation {
     /// Radar-warning cue: each aircraft learns the bearing of the closest enemy
     /// missile whose seeker is active against it.
     fn update_missile_warnings(&mut self) {
+        if !self.config.env.missile_warning {
+            for f in self.fighters.iter_mut() {
+                f.missile_warning = None;
+            }
+            return;
+        }
         for f in self.fighters.iter_mut() {
             f.missile_warning = self
                 .missiles
@@ -632,6 +700,38 @@ impl Simulation {
             let dl = if f.team == 0 { &blue_dl } else { &red_dl };
             f.update_tracks(&enemies, dl);
         }
+    }
+
+    fn log_launch(&mut self, shooter: u32, target: Option<u32>, mid: u32, range_nm: f64) {
+        let Some(f) = self.fighters.iter().find(|f| f.id == shooter) else {
+            return;
+        };
+        let tid = target.unwrap_or(u32::MAX);
+        let tr = f.enemy_tracks.iter().find(|t| t.id == tid);
+        let tgt = self.fighters.iter().find(|g| g.id == tid);
+        let tgt_alt = tgt.map(|g| g.pos[1] / SConv::FT2GDM).unwrap_or(0.0);
+        let tgt_aspect = tgt
+            .map(|g| {
+                crate::geometry::aspect_angle(g.hdg, crate::geometry::heading_to(g.pos, f.pos))
+                    .abs()
+            })
+            .unwrap_or(0.0);
+        self.shots.push(ShotRecord {
+            missile: mid,
+            team: f.team,
+            shooter,
+            target: tid,
+            t: self.time_s(),
+            range_nm,
+            rmax_nm: tr.map(|t| t.own_wez.r_max * SConv::GDM2NM).unwrap_or(0.0),
+            rnez_nm: tr.map(|t| t.own_wez.r_nez * SConv::GDM2NM).unwrap_or(0.0),
+            shooter_alt_ft: f.pos[1] / SConv::FT2GDM,
+            target_alt_ft: tgt_alt,
+            target_aspect_deg: tgt_aspect,
+            shooter_speed_kt: f.speed / SConv::KNOT2GDM_S,
+            result: "in_flight".into(),
+            ..Default::default()
+        });
     }
 
     fn try_fire(
@@ -1286,6 +1386,7 @@ impl Simulation {
             } else {
                 0.0
             },
+            shots: self.shots.clone(),
         }
     }
 }
@@ -1295,6 +1396,36 @@ mod tests {
     use super::*;
     use crate::config::{Behavior, ScenarioConfig};
     use crate::obs::Action;
+
+    #[test]
+    fn shot_log_records_both_teams_with_results() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.blue.behavior = Behavior::Baseline1;
+        cfg.red.behavior = Behavior::Baseline1;
+        cfg.env.max_cycles = 400;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(3));
+        while sim.end == EndCondition::Ongoing {
+            sim.step(&HashMap::new());
+        }
+        let oc = sim.outcome();
+        assert!(!oc.shots.is_empty());
+        assert_eq!(
+            oc.shots.iter().filter(|r| r.team == 0).count() as u32,
+            oc.missiles_fired
+        );
+        for r in &oc.shots {
+            assert!(r.range_nm > 0.0 && r.rmax_nm > 0.0, "{r:?}");
+            assert!(
+                r.range_nm <= r.rmax_nm * 1.2,
+                "scripted shots are inside the WEZ: {r:?}"
+            );
+            assert!(!r.result.is_empty());
+            if r.result == "hit" {
+                assert!(r.tof_s > 0.0);
+            }
+        }
+    }
 
     #[test]
     fn reset_and_step_runs() {

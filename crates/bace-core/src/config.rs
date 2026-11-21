@@ -247,6 +247,14 @@ pub struct EnvConfig {
     pub missile_model: MissileModel,
     /// Aircraft speed model (see [`AircraftModel`]).
     pub aircraft_model: AircraftModel,
+    /// Missile warning: aircraft learn the bearing of an enemy missile whose seeker
+    /// is active against them (scripted pilots defend on it).
+    #[serde(default = "default_true")]
+    pub missile_warning: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for EnvConfig {
@@ -263,6 +271,7 @@ impl Default for EnvConfig {
             missile_support: MissileSupport::default(),
             missile_model: MissileModel::default(),
             aircraft_model: AircraftModel::default(),
+            missile_warning: true,
         }
     }
 }
