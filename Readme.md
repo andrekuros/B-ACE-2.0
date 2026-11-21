@@ -1,19 +1,24 @@
 # B-ACE 2.0
 
-Beyond Visual Range Air Combat Environment — a **Rust-native** simulator with PettingZoo Python bindings and a local web dashboard.
+Beyond Visual Range Air Combat Environment — a **Rust-native** simulator with PettingZoo Python bindings and **B-ACE Lab**, a browser workbench that runs the same simulator compiled to WebAssembly.
 
 Successor to [B-ACE 1.0](https://github.com/andrekuros/B-ACE) (Godot + TCP/JSON). This repository is standalone.
 
 ## Highlights
 
 - High-performance **Rust** sim core (`bace-core`) with in-process parallel envs (`bace-vec`)
+- **Physics from open sources only**: a notional generic medium-range missile (energy, drag, proportional navigation, datalink and seeker), US Standard Atmosphere, aircraft energy, and a weapon engagement zone computed by flying the missile. Every element is traced in [docs/PUBLIC_REFERENCES.md](docs/PUBLIC_REFERENCES.md); no doctrine or system data.
 - Clean **PettingZoo ParallelEnv** API via PyO3 (`from bace import BaceEnv, make_env`)
-- **Web dashboard** with a Three.js combat view, split live envs, replay, and WEZ / FSM recipes
+- **B-ACE Lab** in the browser, no install: scenario builder, 2D tactical display (radar, WEZ/NEZ, tracks, missile guidance state) with an optional 3D view, playback and scrubbing, engagement / reward / altitude telemetry, an event log, and a named observation inspector
+- **In-browser experiments**: cross-play matrices with the paper's metrics and 95% bootstrap CIs, WEZ validation against the missile model, FSM opponent search, and an environment self-test
+- `bace.record.EpisodeRecorder` to watch your trained Python policies in the Lab
 - Three study-case recipes: WEZ characterization, FSM search, IPPO (shared weights) on NativeVecEnv
 - Vectorized `BaceVecEnv` (`NativeVecEnv`, rayon, `record=false`) and `python -m bace.bench`
 - Optional OpenJev tactic head (`examples/openjev`) as a discrete comparison, not a paper result
 
 Blue and red can both be `external` (self-play). Scripted red behaviors are `baseline1`, `duck`, and `fire_once`. Public recipes cap force size at 4v4.
+
+Scripted episodes are deterministic unless you add randomness: set `beh_noise` (relative jitter on the FSM thresholds per decision, e.g. `0.1`) and/or `rnd_offset_range` (spawn jitter) on a team. Without them every seed produces the same scripted episode. See [docs/MODEL.md](docs/MODEL.md).
 
 ## Quick start
 
@@ -29,14 +34,40 @@ pytest -q tests/python
 python -m bace.examples.random_policy
 ```
 
-### Dashboard
+### B-ACE Lab (browser)
 
 ```bash
+./scripts/build_web.sh                      # builds web/dist/engine/bace.wasm
 cargo run -p bace-server -- --port 8787 --static-dir web/dist --runs-dir runs
 # open http://127.0.0.1:8787
 ```
 
-Start a live job (4 envs, baseline vs duck), then use Experiment → WEZ or FSM.
+Any static file server works too (`python -m http.server -d web/dist`); the server only adds the
+list of recordings under `runs/`. The `pages` workflow publishes the same folder to GitHub Pages.
+
+| Tab | What it does |
+|-----|--------------|
+| Simulate | Presets or your own scenario; pilots are scripted FSMs or RL slots (random, idle, or flown with the keyboard). Copy the scenario as Python or JSON. |
+| Evaluate | Every blue pilot against every red pilot, N episodes each, in Web Workers. F/B/R-score, mission, missile efficiency and return, each with a 95% bootstrap CI. Export CSV. |
+| WEZ | Polar plot of the analytic envelope the agents observe, and the WEZ recipe measuring real hit rates against it. |
+| FSM search | The GA recipe for scripted opponents; promote elites to pilots. |
+| Diagnostics | Reproducibility, seed variety, observation contract and bounds, no information on undetected enemies, reward accounting, termination flags, event log, WEZ consistency, speed. |
+| Replay | Open episodes saved from the Lab, from Python, or listed by the server. |
+
+Watch a Python policy:
+
+```python
+from bace import make_env
+from bace.record import EpisodeRecorder
+
+env = EpisodeRecorder(make_env(opponent="aggressive"), runs_dir="runs")
+obs, infos = env.reset(seed=3)
+while env.agents:
+    obs, rewards, terms, truncs, infos = env.step({a: policy(obs[a]) for a in env.agents})
+# runs/<id>/episode.json now shows under Replay
+```
+
+Web tests: `cd tests/web && npm ci && npx playwright install chromium && npm test`.
 
 ## Demo path (framework release)
 
@@ -62,7 +93,7 @@ actions = {a: env.action_space(a).sample() for a in env.agents}
 obs, rewards, terms, truncs, infos = env.step(actions)
 ```
 
-`make_env(opponent=...)` accepts `duck`, `baseline`, `aggressive`, `balanced`, `cautious`, `fsm`. Caps at **4v4** with a 2×2 box spawn (4 NM). `share_tracks` and `red_mission="striker"` are keyword args.
+`make_env(opponent=...)` accepts `duck`, `baseline`, the reference pilots `ref_aggressive`, `ref_balanced`, `ref_conservative`, and the searched profiles `aggressive`, `balanced`, `cautious`. Caps at **4v4** with a 2×2 box spawn (4 NM). `share_tracks` and `red_mission="striker"` are keyword args.
 
 Observations are exported as a flat `float32` vector: own(9) + enemies(13 each) + allies(6 each).
 Continuous actions are `[d_heading, d_altitude, g_force, fire]` in `[-1, 1]`.
@@ -89,9 +120,14 @@ results = run_experiment([{
 | `crates/bace-vec` | Batched parallel envs + WEZ/FSM recipes |
 | `crates/bace-record` | Episode JSON recordings under `runs/` |
 | `crates/bace-py` | PyO3 native module |
-| `crates/bace-server` | Axum HTTP/WS dashboard API |
-| `python/bace` | PettingZoo wrapper + experiment CLI |
-| `web/dist` | Three.js live view, replay, WEZ/FSM experiment UI |
+| `crates/bace-server` | Axum server for the Lab and recordings |
+| `crates/bace-wasm` | WebAssembly build of the simulator (plain JSON C ABI) |
+| `python/bace` | PettingZoo wrapper, experiment CLI, episode recorder |
+| `web/dist` | B-ACE Lab (vanilla ES modules, no build step) |
+| `tests/web` | Node tests for the engine and a headless smoke test of every tab |
+| `docs/MODEL.md` | What is simulated, and known limitations |
+| `docs/PUBLIC_REFERENCES.md` | Open-literature source of every model element |
+| `configs/reference/` | Reference scripted pilots |
 | `examples/openjev` | Optional discrete tactic head vs duck and baseline1 |
 | `configs/experiments/` | WEZ, FSM, MARL recipe JSON |
 | `examples/` | Thin wrappers around the package CLI |

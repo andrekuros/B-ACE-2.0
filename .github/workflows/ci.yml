@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test -p bace-core -p bace-record -p bace-vec
+      - run: cargo test -p bace-core -p bace-record -p bace-vec -p bace-wasm
       - run: cargo build -p bace-server
 
   python:
@@ -22,6 +22,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install maturin pytest pettingzoo gymnasium numpy
-      - run: maturin develop -m crates/bace-py/Cargo.toml
-      - run: pytest -q tests/python
+      - run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install maturin pytest pettingzoo gymnasium numpy
+          maturin develop -m crates/bace-py/Cargo.toml
+          pytest -q tests/python
+
+  # The browser Lab: WebAssembly engine tests in Node, then a headless run of every tab.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: ./scripts/build_web.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - working-directory: tests/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm test

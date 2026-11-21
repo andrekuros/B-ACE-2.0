@@ -299,7 +299,11 @@ def run_fsm(
     out_dir: Optional[Path] = None,
     smoke: bool = False,
     profile: str = "default",
+    write_baselines: bool = False,
 ) -> dict[str, Any]:
+    """Run the FSM search. Elites overwrite ``configs/baselines/`` only when
+    ``write_baselines`` is set (the CLI does this for non-smoke runs), so tests and
+    benchmarks never replace the curated opponent profiles."""
     _, _, fsm_fn = _native()
     if profile == "paper":
         merged = {**_load_recipe_json("fsm_paper"), **(params or {})}
@@ -331,8 +335,9 @@ def run_fsm(
     dest = out_dir or Path("runs/experiments")
     json_path = write_artifact(dest, "fsm", report)
     base_dir = _configs_root() / "baselines"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    for elite in report.get("elites", []):
+    if write_baselines:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    for elite in (report.get("elites", []) if write_baselines else []):
         label = elite.get("label", "elite")
         genome = elite.get("genome", {})
         n = int(merged.get("num_agents", 2) or 2)
@@ -603,7 +608,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         print("wrote", report.get("_artifact"))
     elif args.recipe == "fsm":
         report = run_fsm(
-            max_parallel=args.max_parallel, out_dir=args.out, smoke=profile == "smoke", profile=profile
+            max_parallel=args.max_parallel,
+            out_dir=args.out,
+            smoke=profile == "smoke",
+            profile=profile,
+            write_baselines=profile != "smoke",
         )
         print(report.get("summary", json.dumps(report, indent=2)))
         print("wrote", report.get("_artifact"))

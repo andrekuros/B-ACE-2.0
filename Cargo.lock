@@ -172,10 +172,10 @@ version = "2.0.0"
 dependencies = [
  "approx",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
- "uuid",
 ]
 
 [[package]]
@@ -236,7 +236,17 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "uuid",
+]
+
+[[package]]
+name = "bace-wasm"
+version = "2.0.0"
+dependencies = [
+ "bace-core",
+ "bace-vec",
+ "rand",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -2,134 +2,371 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>B-ACE 2.0 Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B-ACE Lab: BVR air combat in your browser</title>
+  <meta name="description" content="Run, watch and evaluate beyond-visual-range air combat agents in your browser. B-ACE 2.0 simulator compiled to WebAssembly." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cg fill='none' stroke='%231f5fa8' stroke-width='2'%3E%3Ccircle cx='16' cy='16' r='13'/%3E%3Ccircle cx='16' cy='16' r='6'/%3E%3Cpath d='M16 1v30M1 16h30'/%3E%3C/g%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=3" />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./lab.css" />
+  <script>
+    (function () {
+      var p = "auto";
+      try { p = localStorage.getItem("bace-lab-theme") || "auto"; } catch (e) {}
+      var dark = p === "dark" || (p === "auto" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+    })();
+  </script>
   <script type="importmap">
-  {
-    "imports": {
+  { "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-    }
-  }
+  } }
   </script>
 </head>
 <body>
-  <div class="app">
-    <header class="top">
-      <div class="brand">
-        <span class="mark">B-ACE</span>
-        <span class="ver">2.0</span>
-      </div>
-      <nav>
-        <button data-view="live" class="active">Live</button>
-        <button data-view="replay">Replay</button>
-        <button data-view="experiment">Experiment</button>
-      </nav>
-      <div id="health" class="health">…</div>
-    </header>
+  <header class="bar">
+    <a class="wordmark" href="#simulate" aria-label="B-ACE Lab home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" /><circle cx="16" cy="16" r="7" /><path d="M16 1v30M1 16h30" /></svg>
+      <span>B-ACE <em>Lab</em></span>
+    </a>
+    <nav class="tabs" role="tablist">
+      <a role="tab" href="#simulate" data-tab="simulate">Simulate</a>
+      <a role="tab" href="#evaluate" data-tab="evaluate">Evaluate</a>
+      <a role="tab" href="#wez" data-tab="wez">WEZ</a>
+      <a role="tab" href="#fsm" data-tab="fsm">FSM search</a>
+      <a role="tab" href="#diagnostics" data-tab="diagnostics">Diagnostics</a>
+      <a role="tab" href="#replay" data-tab="replay">Replay</a>
+    </nav>
+    <div class="status" id="engine-status">Loading engine…</div>
+    <div class="seg theme" id="theme" role="radiogroup" aria-label="Colour theme">
+      <button data-theme-pref="auto" title="Follow the system setting">Auto</button>
+      <button data-theme-pref="light">Light</button>
+      <button data-theme-pref="dark">Dark</button>
+    </div>
+  </header>
 
-    <main>
-      <section id="view-live" class="view">
-        <aside class="panel">
-          <h2>Parallel jobs</h2>
-          <label>Envs <input id="num-envs" type="number" min="1" max="32" value="4" /></label>
-          <label>Agents / side <input id="num-agents" type="number" min="1" max="4" value="1" /></label>
-          <label>Max cycles <input id="max-cycles" type="number" min="10" value="200" /></label>
-          <button id="start-job" class="cta">Start simulation</button>
-          <ul id="job-list"></ul>
-
-          <h2>View</h2>
-          <div class="seg" id="layout-seg">
-            <button type="button" data-layout="split" class="active">Split</button>
-            <button type="button" data-layout="focus">Focus</button>
-          </div>
-          <label>Env
-            <select id="env-picker"></select>
-          </label>
-          <div class="cam-modes" data-scene="live">
-            <button type="button" data-cam="orbit" class="active">Orbit</button>
-            <button type="button" data-cam="chase">Chase</button>
-            <button type="button" data-cam="tactical">Tactical</button>
-          </div>
-          <label class="check"><input id="cfg-radar" type="checkbox" checked /> Radar</label>
-          <label class="check"><input id="cfg-tracks" type="checkbox" checked /> Tracks</label>
-          <label class="check"><input id="cfg-wez" type="checkbox" checked /> WEZ</label>
-          <label class="check"><input id="cfg-labels" type="checkbox" checked /> Labels</label>
-          <label class="check"><input id="cfg-stems" type="checkbox" checked /> Altitude stems</label>
-          <label>Aircraft <input id="cfg-ac-scale" type="range" min="1" max="8" step="0.5" value="3" /></label>
-          <label>Missiles <input id="cfg-msl-scale" type="range" min="1" max="10" step="0.5" value="4" /></label>
-          <label>Altitude <input id="cfg-alt-scale" type="range" min="1" max="10" step="0.5" value="4" /></label>
-        </aside>
-        <div class="stage">
-          <div class="viewport" id="live-viewport">
-            <canvas id="live-canvas"></canvas>
-            <div class="view-toolbar">
-              <button type="button" id="back-split" class="ghost hidden">Back to split</button>
-            </div>
-          </div>
-          <div id="live-meta" class="meta"></div>
-        </div>
+  <!-- ===================== SIMULATE ===================== -->
+  <main id="tab-simulate" class="tab simulate" hidden>
+    <aside class="col scenario" aria-label="Scenario">
+      <section>
+        <h2>Scenario</h2>
+        <label class="field">Preset
+          <select id="preset"></select>
+        </label>
+        <p class="hint" id="preset-note"></p>
       </section>
-
-      <section id="view-replay" class="view hidden">
-        <aside class="panel">
-          <h2>Past runs</h2>
-          <button id="refresh-runs">Refresh</button>
-          <ul id="run-list"></ul>
-          <div class="scrub">
-            <input id="scrubber" type="range" min="0" max="0" value="0" />
-            <div class="row">
-              <button id="play-replay">Play</button>
-              <label>Speed <input id="replay-speed" type="number" min="0.25" max="20" step="0.25" value="2" /></label>
-            </div>
-          </div>
-        </aside>
-        <div class="stage">
-          <div class="viewport" id="replay-viewport">
-            <canvas id="replay-canvas"></canvas>
-            <div class="view-toolbar">
-              <div class="cam-modes" data-scene="replay">
-                <button type="button" data-cam="orbit" class="active">Orbit</button>
-                <button type="button" data-cam="chase">Chase</button>
-                <button type="button" data-cam="tactical">Tactical</button>
-              </div>
-            </div>
-          </div>
-          <pre id="replay-inspect" class="inspect"></pre>
+      <section class="side" data-side="blue">
+        <h3><span class="swatch blue"></span>Blue force</h3>
+        <div class="grid2">
+          <label class="field">Pilot <select data-k="pilot"></select></label>
+          <label class="field">Aircraft <input data-k="num_agents" type="number" min="1" max="4" /></label>
+          <label class="field">Mission <select data-k="mission"><option value="dca">Defend (DCA)</option><option value="striker">Strike target</option></select></label>
+          <label class="field">Datalink <select data-k="share_tracks"><option value="true">Shared tracks</option><option value="false">Own radar only</option></select></label>
         </div>
+        <details>
+          <summary>Spawn and noise</summary>
+          <div class="grid3">
+            <label class="field">East NM <input data-k="init_x" type="number" step="1" /></label>
+            <label class="field">South NM <input data-k="init_z" type="number" step="1" /></label>
+            <label class="field">Alt ft <input data-k="init_y" type="number" step="1000" /></label>
+            <label class="field">Heading <input data-k="init_hdg" type="number" step="15" /></label>
+            <label class="field">Jitter NM <input data-k="rnd_xz" type="number" step="1" min="0" /></label>
+            <label class="field">FSM noise <input data-k="beh_noise" type="number" step="0.05" min="0" max="0.5" /></label>
+          </div>
+        </details>
       </section>
-
-      <section id="view-experiment" class="view hidden">
-        <aside class="panel">
-          <h2>Batch experiment</h2>
-          <label>Recipe
-            <select id="exp-recipe">
-              <option value="wez">WEZ validation</option>
-              <option value="fsm">FSM search</option>
+      <section class="side" data-side="red">
+        <h3><span class="swatch red"></span>Red force</h3>
+        <div class="grid2">
+          <label class="field">Pilot <select data-k="pilot"></select></label>
+          <label class="field">Aircraft <input data-k="num_agents" type="number" min="1" max="4" /></label>
+          <label class="field">Mission <select data-k="mission"><option value="dca">Defend (DCA)</option><option value="striker">Strike target</option></select></label>
+          <label class="field">Datalink <select data-k="share_tracks"><option value="true">Shared tracks</option><option value="false">Own radar only</option></select></label>
+        </div>
+        <details>
+          <summary>Spawn and noise</summary>
+          <div class="grid3">
+            <label class="field">East NM <input data-k="init_x" type="number" step="1" /></label>
+            <label class="field">South NM <input data-k="init_z" type="number" step="1" /></label>
+            <label class="field">Alt ft <input data-k="init_y" type="number" step="1000" /></label>
+            <label class="field">Heading <input data-k="init_hdg" type="number" step="15" /></label>
+            <label class="field">Jitter NM <input data-k="rnd_xz" type="number" step="1" min="0" /></label>
+            <label class="field">FSM noise <input data-k="beh_noise" type="number" step="0.05" min="0" max="0.5" /></label>
+          </div>
+        </details>
+      </section>
+      <section>
+        <h3>Episode</h3>
+        <div class="grid2">
+          <label class="field">Seed <input id="env-seed" type="number" min="0" step="1" /></label>
+          <label class="field">Max decisions <input id="env-max" type="number" min="10" step="50" /></label>
+        </div>
+        <div class="grid2" style="margin-top:.5rem">
+          <label class="field">Missile
+            <select id="env-model">
+              <option value="generic_mraam">Generic MRAAM</option>
+              <option value="legacy">Legacy 2.0 (constant speed)</option>
             </select>
           </label>
-          <label id="exp-cases-label">Repeats / pop <input id="exp-cases" type="number" min="1" max="32" value="4" /></label>
-          <label>Max cycles <input id="exp-cycles" type="number" min="20" value="150" /></label>
-          <label id="exp-gen-row" class="hidden">Generations <input id="exp-gens" type="number" min="1" max="30" value="5" /></label>
-          <button id="run-exp" class="cta">Run experiment</button>
-          <p id="exp-summary" class="meta"></p>
-        </aside>
-        <div class="stage exp-stage">
-          <div class="table-wrap">
-            <table id="exp-table">
-              <thead></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <pre id="exp-out" class="inspect"></pre>
+          <label class="field">Datalink support
+            <select id="env-support">
+              <option value="track">While shooter tracks</option>
+              <option value="launch">Always (until active)</option>
+            </select>
+          </label>
+        </div>
+        <details>
+          <summary>Reward weights</summary>
+          <div class="grid2" id="reward-fields"></div>
+        </details>
+        <div class="row">
+          <button id="apply-scenario" class="primary">Start episode</button>
+          <button id="new-seed" title="Same scenario, next seed">Next seed</button>
         </div>
       </section>
-    </main>
-  </div>
-  <script type="module" src="/app.js?v=3"></script>
+      <section>
+        <h3>Use it in Python</h3>
+        <div class="row wrap">
+          <button id="copy-python">Copy Python</button>
+          <button id="copy-json">Copy JSON</button>
+          <button id="import-json">Import JSON</button>
+        </div>
+        <p class="hint">The same scenario runs in <code>bace.BaceEnv(config)</code>. Pilots marked “RL” are <code>external</code> agents your policy controls.</p>
+      </section>
+    </aside>
+
+    <section class="col theatre" aria-label="Tactical display">
+      <div class="chart-wrap" id="chart-wrap">
+        <canvas id="tactical" aria-label="Tactical chart. Drag to pan, scroll to zoom, click an aircraft to select it."></canvas>
+        <div class="overlay tl" id="clock"></div>
+        <div class="overlay tr layers" id="layers">
+          <label title="Radar coverage of the selected aircraft"><input type="checkbox" data-layer="radar" checked /> Radar</label>
+          <label><input type="checkbox" data-layer="wez" checked /> WEZ</label>
+          <label><input type="checkbox" data-layer="tracks" checked /> Tracks</label>
+          <label><input type="checkbox" data-layer="trails" checked /> Trails</label>
+          <label><input type="checkbox" data-layer="labels" checked /> Labels</label>
+          <button id="fit-view" class="small">Fit</button>
+          <button id="toggle-3d" class="small">3D</button>
+        </div>
+        <div class="overlay bl legend2d">
+          <span><i class="sym friend"></i>Blue</span>
+          <span><i class="sym hostile"></i>Red</span>
+          <span><i class="dot uplink"></i>Missile, datalink guided</span>
+          <span><i class="dot pitbull"></i>Missile, own seeker</span>
+          <span><i class="dot coast"></i>Missile, unguided</span>
+        </div>
+        <div class="manual-help overlay br" id="manual-help" hidden>You fly agent_0. Arrow keys turn and climb, Space fires.</div>
+        <div class="three-host" id="three-host" hidden><canvas id="three-canvas"></canvas></div>
+      </div>
+      <div class="transport">
+        <button id="play" class="primary icon" aria-label="Play">Play</button>
+        <button id="step" class="icon" aria-label="Step one decision">Step</button>
+        <div class="seg" id="speed" role="radiogroup" aria-label="Playback speed">
+          <button data-speed="1">1×</button>
+          <button data-speed="5">5×</button>
+          <button data-speed="20" class="on">20×</button>
+          <button data-speed="80">80×</button>
+          <button data-speed="400">Max</button>
+        </div>
+        <div class="scrub">
+          <canvas id="event-ticks" aria-hidden="true"></canvas>
+          <input id="scrubber" type="range" min="0" max="0" value="0" aria-label="Timeline" />
+        </div>
+        <button id="save-episode" title="Download this episode as JSON">Save</button>
+      </div>
+      <div class="strip">
+        <canvas id="alt-strip" aria-label="Altitude profile"></canvas>
+      </div>
+    </section>
+
+    <aside class="col telemetry" aria-label="Telemetry">
+      <section>
+        <h2 id="sel-title">Select an aircraft</h2>
+        <p class="hint" id="sel-sub"></p>
+        <div class="kv" id="sel-kv"></div>
+      </section>
+      <section>
+        <h3>Range to target vs weapon envelopes</h3>
+        <canvas class="chart" id="eng-chart" height="170"></canvas>
+        <p class="hint">Shaded band: our missile envelope, from no-escape range up to max range. When the range line enters it we can shoot; when it drops below their NEZ we are in their no-escape zone. Vertical lines mark launches and hits.</p>
+      </section>
+      <section>
+        <h3>Reward, cumulative</h3>
+        <canvas class="chart" id="rew-chart" height="150"></canvas>
+      </section>
+      <section>
+        <h3>Observation <span class="count" id="obs-size"></span></h3>
+        <div id="obs-table" class="obs"></div>
+      </section>
+      <section>
+        <h3>Events</h3>
+        <ol id="events" class="events"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <!-- ===================== EVALUATE ===================== -->
+  <main id="tab-evaluate" class="tab page" hidden>
+    <aside class="col">
+      <h2>Cross-play evaluation</h2>
+      <p class="hint">Every blue pilot plays every red pilot. Metrics follow Kuroswiski et al. with 95% bootstrap confidence intervals.</p>
+      <fieldset><legend>Blue pilots</legend><div id="eval-blue" class="checks"></div></fieldset>
+      <fieldset><legend>Red pilots</legend><div id="eval-red" class="checks"></div></fieldset>
+      <div class="grid2">
+        <label class="field">Aircraft per side <input id="eval-n" type="number" min="1" max="4" value="1" /></label>
+        <label class="field">Episodes per match <input id="eval-eps" type="number" min="2" max="500" value="30" /></label>
+        <label class="field">Max decisions <input id="eval-max" type="number" min="50" value="600" /></label>
+        <label class="field">Red mission <select id="eval-mission"><option value="dca">Defend (DCA)</option><option value="striker">Strike target</option></select></label>
+        <label class="field">FSM noise <input id="eval-noise" type="number" min="0" max="0.5" step="0.05" value="0.1" /></label>
+        <label class="field">Spawn jitter NM <input id="eval-jitter" type="number" min="0" step="1" value="4" /></label>
+        <label class="field">Missile <select id="eval-model"><option value="generic_mraam">Generic MRAAM</option><option value="legacy">Legacy 2.0</option></select></label>
+        <label class="field">Datalink support <select id="eval-support"><option value="track">While shooter tracks</option><option value="launch">Always (until active)</option></select></label>
+      </div>
+      <div class="row"><button id="eval-run" class="primary">Run evaluation</button><button id="eval-export" disabled>Export CSV</button></div>
+      <progress id="eval-progress" value="0" max="1" hidden></progress>
+      <p class="hint" id="eval-status"></p>
+    </aside>
+    <section class="col wide">
+      <div class="metric-pick seg" id="eval-metric">
+        <button data-m="fscore" class="on">F-score</button>
+        <button data-m="bscore">B-score</button>
+        <button data-m="rscore">R-score</button>
+        <button data-m="macc">Mission</button>
+        <button data-m="beff">Missile eff.</button>
+        <button data-m="eprew">Return</button>
+      </div>
+      <div id="eval-matrix" class="matrix"><p class="empty">Pick pilots on each side and run an evaluation. A 4×4 matrix at 30 episodes takes a few seconds.</p></div>
+      <div id="eval-detail"></div>
+      <details class="defs">
+        <summary>Metric definitions</summary>
+        <dl>
+          <dt>B-score</dt><dd>Red aircraft neutralized by blue, mean per episode.</dd>
+          <dt>R-score</dt><dd>Blue aircraft neutralized by red, mean per episode.</dd>
+          <dt>F-score</dt><dd>B-score minus R-score: the net exchange.</dd>
+          <dt>Mission</dt><dd>Share of episodes where blue’s mission held (red striker did not reach its target and blue was not wiped out).</dd>
+          <dt>Missile eff.</dt><dd>Blue hits divided by blue missiles fired, pooled over episodes.</dd>
+          <dt>Return</dt><dd>Blue team cumulative reward per episode, using the configured reward weights.</dd>
+        </dl>
+      </details>
+    </section>
+  </main>
+
+  <!-- ===================== WEZ ===================== -->
+  <main id="tab-wez" class="tab page" hidden>
+    <aside class="col">
+      <h2>Weapon engagement zone</h2>
+      <p class="hint">Max launch range (R<sub>max</sub>, dashed) and no-escape range (NEZ, solid) the agents observe, by where the target points relative to us, with the target on our nose. Derived by flying the missile model, not by formula.</p>
+      <div class="grid2">
+        <label class="field">Missile
+          <select id="wez-model"><option value="generic">Generic MRAAM</option><option value="legacy">Legacy 2.0</option></select>
+        </label>
+        <span></span>
+        <label class="field">Shooter altitude <output id="wez-alt-out"></output>
+          <input id="wez-alt" type="range" min="5000" max="45000" step="1000" value="25000" />
+        </label>
+        <label class="field">Target altitude <output id="wez-talt-out"></output>
+          <input id="wez-talt" type="range" min="5000" max="45000" step="1000" value="25000" />
+        </label>
+      </div>
+      <canvas id="wez-polar" class="polar" aria-label="WEZ polar plot"></canvas>
+      <h3>Validate against the missile model</h3>
+      <p class="hint">Fires one missile per case from a fixed range at a non-maneuvering target and measures hits. Same recipe as <code>python -m bace.experiment wez</code>.</p>
+      <div class="grid2">
+        <label class="field">Ranges NM <input id="wez-ranges" value="4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48" /></label>
+        <label class="field">Altitudes ft <input id="wez-alts" value="10000, 25000, 40000" /></label>
+      </div>
+      <div class="row wrap checks">
+        <label><input type="checkbox" name="wez-asp" value="head" checked /> Head-on</label>
+        <label><input type="checkbox" name="wez-asp" value="beam" checked /> Beam</label>
+        <label><input type="checkbox" name="wez-asp" value="tail" checked /> Tail</label>
+      </div>
+      <div class="row"><button id="wez-run" class="primary">Run WEZ recipe</button></div>
+      <p class="hint" id="wez-status"></p>
+    </aside>
+    <section class="col wide">
+      <h3>Range card, co-altitude, target on the nose</h3>
+      <div id="wez-card" class="tablewrap"></div>
+      <h3>Hit rate vs launch range</h3>
+      <canvas class="chart big" id="wez-chart" height="360"></canvas>
+      <p class="hint">Dashed verticals: the R<sub>max</sub> agents observe for each curve. A consistent model shows the hit rate falling to zero close to its dashed line. Launches are delayed beyond the 50 NM radar range, so the sweep stops at 48 NM.</p>
+      <div id="wez-summary" class="tablewrap"></div>
+      <details class="defs">
+        <summary>Generic missile parameters</summary>
+        <div id="wez-params" class="tablewrap"></div>
+      </details>
+    </section>
+  </main>
+
+  <!-- ===================== FSM ===================== -->
+  <main id="tab-fsm" class="tab page" hidden>
+    <aside class="col">
+      <h2>Scripted opponent search</h2>
+      <p class="hint">Evolves the three FSM thresholds (shot distance, crank, break) against a growing pool of opponents, as in the paper’s baseline enemy selection. Keep some noise or jitter: without them every episode of a pairing is identical.</p>
+      <div class="grid2">
+        <label class="field">Population <input id="fsm-pop" type="number" min="4" max="64" value="12" /></label>
+        <label class="field">Generations <input id="fsm-gen" type="number" min="1" max="60" value="8" /></label>
+        <label class="field">Episodes each <input id="fsm-eps" type="number" min="1" max="32" value="4" /></label>
+        <label class="field">Max decisions <input id="fsm-max" type="number" min="50" value="600" /></label>
+        <label class="field">Aircraft per side <input id="fsm-n" type="number" min="1" max="4" value="1" /></label>
+        <label class="field">Seed <input id="fsm-seed" type="number" min="0" value="1" /></label>
+        <label class="field">FSM noise <input id="fsm-noise" type="number" min="0" max="0.5" step="0.05" value="0.1" /></label>
+        <label class="field">Spawn jitter NM <input id="fsm-jitter" type="number" min="0" step="1" value="4" /></label>
+      </div>
+      <div class="row"><button id="fsm-run" class="primary">Run search</button></div>
+      <p class="hint" id="fsm-status"></p>
+    </aside>
+    <section class="col wide">
+      <h3>Fitness by generation</h3>
+      <canvas class="chart big" id="fsm-chart" height="260"></canvas>
+      <h3>Elites</h3>
+      <div id="fsm-elites" class="tablewrap"><p class="empty">Run a search to find elite opponents. Add them as pilots for Simulate and Evaluate.</p></div>
+    </section>
+  </main>
+
+  <!-- ===================== DIAGNOSTICS ===================== -->
+  <main id="tab-diagnostics" class="tab page" hidden>
+    <aside class="col">
+      <h2>Environment self-test</h2>
+      <p class="hint">Checks the properties an RL benchmark relies on: reproducibility, observation contract, no privileged information, reward accounting, and speed. Everything runs on this machine in WebAssembly.</p>
+      <div class="row"><button id="diag-run" class="primary">Run all checks</button></div>
+      <p class="hint" id="diag-status"></p>
+    </aside>
+    <section class="col wide">
+      <table class="diag" id="diag-table">
+        <thead><tr><th>Check</th><th>Result</th><th>Detail</th><th class="num">ms</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ===================== REPLAY ===================== -->
+  <main id="tab-replay" class="tab page" hidden>
+    <aside class="col">
+      <h2>Replay an episode</h2>
+      <p class="hint">Open an episode saved from the Lab, recorded from Python with <code>bace.record.EpisodeRecorder</code>, or written by the dashboard server.</p>
+      <label class="drop" id="drop">
+        <input type="file" id="file-input" accept=".json,application/json" />
+        <span>Drop an episode file here or choose one</span>
+      </label>
+      <h3>From the local server</h3>
+      <div class="row"><button id="runs-refresh">Refresh</button></div>
+      <p class="hint" id="runs-status"></p>
+    </aside>
+    <section class="col wide">
+      <ul id="run-list" class="runs"></ul>
+    </section>
+  </main>
+
+  <dialog id="import-dialog">
+    <form method="dialog">
+      <h3>Import scenario JSON</h3>
+      <textarea id="import-text" rows="14" spellcheck="false"></textarea>
+      <div class="row"><button value="cancel">Cancel</button><button value="ok" class="primary">Import</button></div>
+    </form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="./js/app.js"></script>
 </body>
 </html>

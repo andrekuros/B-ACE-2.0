@@ -1,0 +1,11 @@
+{
+  "name": "bace-lab-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test engine.test.mjs && node lab.smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.49.1"
+  }
+}

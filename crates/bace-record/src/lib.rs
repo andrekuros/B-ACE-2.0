@@ -25,6 +25,9 @@ pub struct StepRecord {
     pub reward_breakdowns: std::collections::HashMap<String, RewardBreakdown>,
     pub obs: std::collections::HashMap<String, StructuredObs>,
     pub snapshot: SimSnapshot,
+    /// Events emitted during this step (absent in recordings made before 2.1).
+    #[serde(default)]
+    pub events: Vec<bace_core::SimEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

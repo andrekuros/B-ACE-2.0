@@ -2,8 +2,8 @@
 
 use crate::config::{ScenarioConfig, TeamConfig};
 use crate::fighter::{AircraftView, Fighter, FsmState};
-use crate::geometry::distance2d;
-use crate::missile::Missile;
+use crate::geometry::{distance2d, heading_to};
+use crate::missile::{velocity_ms, Missile, TargetState};
 use crate::obs::{Action, StructuredObs};
 use crate::rewards::RewardBreakdown;
 use crate::units::SConv;
@@ -32,6 +32,47 @@ pub enum EndCondition {
     RedMission,
 }
 
+/// Discrete things that happened during a step, for logs, replays and analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventKind {
+    /// `actor` launched missile `missile` at `target`; `value` = range in NM.
+    Launch,
+    /// Missile `missile` went active (own seeker); `value` = time of flight in s.
+    Pitbull,
+    /// Missile `missile` from `actor` destroyed `target`; `value` = time of flight in s.
+    Hit,
+    /// Missile `missile` from `actor` missed `target`; `detail` = cause.
+    Miss,
+    /// `actor` gained a track on `target` (local radar or datalink).
+    TrackGained,
+    /// `actor` lost the track on a live `target`.
+    TrackLost,
+    /// Episode ended; `detail` = end condition.
+    End,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimEvent {
+    /// Simulated time in seconds.
+    pub t: f64,
+    pub step: u32,
+    pub kind: EventKind,
+    pub actor: u32,
+    #[serde(default)]
+    pub target: Option<u32>,
+    #[serde(default)]
+    pub missile: Option<u32>,
+    #[serde(default)]
+    pub value: f64,
+    #[serde(default)]
+    pub detail: String,
+    /// Shooter-to-target range in NM at this moment: the A-pole on `pitbull`,
+    /// the F-pole on `hit` / `miss`. 0 when not applicable.
+    #[serde(default)]
+    pub pole_nm: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStep {
     pub obs: StructuredObs,
@@ -47,6 +88,9 @@ pub struct StepResult {
     pub agents: HashMap<AgentId, AgentStep>,
     pub end: EndCondition,
     pub action_step: u32,
+    /// Events emitted since the previous step (or reset).
+    #[serde(default)]
+    pub events: Vec<SimEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +101,18 @@ pub struct TrackSnapshot {
     pub aspect: f64,
     pub own_r_max: f64,
     pub is_missile_support: bool,
+    #[serde(default)]
+    pub own_r_nez: f64,
+    #[serde(default)]
+    pub enemy_r_max: f64,
+    #[serde(default)]
+    pub enemy_r_nez: f64,
+    #[serde(default)]
+    pub angle_off: f64,
+    #[serde(default)]
+    pub offensive_factor: f64,
+    #[serde(default)]
+    pub threat_factor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +134,19 @@ pub struct FighterSnapshot {
     pub radar_vfov_up: f64,
     pub radar_vfov_down: f64,
     pub tracks: Vec<TrackSnapshot>,
+    #[serde(default)]
+    pub behavior: Option<crate::config::Behavior>,
+    #[serde(default)]
+    pub mission: Option<crate::config::Mission>,
+    #[serde(default)]
+    pub target_pos: Option<[f64; 3]>,
+    #[serde(default)]
+    pub hdg_cmd: f64,
+    #[serde(default)]
+    pub g_cmd: f64,
+    /// Cumulative reward breakdown for this aircraft (computed for scripted agents too).
+    #[serde(default)]
+    pub reward: RewardBreakdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,12 +158,25 @@ pub struct MissileSnapshot {
     pub pitbull: bool,
     pub target_id: u32,
     pub has_support: bool,
+    #[serde(default)]
+    pub shooter_id: u32,
+    #[serde(default)]
+    pub time_alive: f64,
+    /// Mach number (generic model; 0 for the legacy missile).
+    #[serde(default)]
+    pub mach: f64,
+    /// `boost`, `sustain`, `coast` or `legacy`.
+    #[serde(default)]
+    pub phase: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimSnapshot {
     pub action_step: u32,
     pub end: EndCondition,
+    /// Simulated time in seconds.
+    #[serde(default)]
+    pub time_s: f64,
     pub fighters: Vec<FighterSnapshot>,
     pub missiles: Vec<MissileSnapshot>,
 }
@@ -154,6 +236,7 @@ pub struct Simulation {
     fire_range_n: u32,
     tracks_on_sum: f64,
     tracks_on_n: u32,
+    events: Vec<SimEvent>,
 }
 
 impl Simulation {
@@ -188,6 +271,7 @@ impl Simulation {
             fire_range_n: 0,
             tracks_on_sum: 0.0,
             tracks_on_n: 0,
+            events: Vec::new(),
         };
         sim.spawn_teams();
         sim
@@ -226,6 +310,12 @@ impl Simulation {
         (base, target, team.init_hdg)
     }
 
+    /// Per-aircraft FSM noise stream derived from the episode seed without
+    /// consuming the spawn RNG (keeps pre-existing spawn sequences unchanged).
+    fn noise_seed(seed: u64, id: u32) -> u64 {
+        seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (id as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
+    }
+
     fn spawn_teams(&mut self) {
         self.fighters.clear();
         self.missiles.clear();
@@ -239,8 +329,7 @@ impl Simulation {
         let red_ids: Vec<u32> = (0..n_red).map(|i| 201 + i as u32).collect();
 
         for (i, &id) in blue_ids.iter().enumerate() {
-            let (pos, target, hdg) =
-                Self::pos_from_cfg(&self.config.blue, i, &mut self.rng);
+            let (pos, target, hdg) = Self::pos_from_cfg(&self.config.blue, i, &mut self.rng);
             let allies: Vec<u32> = blue_ids.iter().copied().filter(|x| *x != id).collect();
             let f = Fighter::new(
                 id,
@@ -255,7 +344,13 @@ impl Simulation {
                 self.config.env.rewards.clone(),
                 &red_ids,
                 allies,
-            );
+            )
+            .with_noise(
+                self.config.blue.beh_noise,
+                Self::noise_seed(self.config.env.seed, id),
+            )
+            .with_missile_model(self.config.env.missile_model)
+            .with_aircraft_model(self.config.env.aircraft_model);
             let agent_name = format!("agent_{i}");
             self.blue_agent_ids.push(agent_name);
             self.fighters.push(f);
@@ -277,10 +372,75 @@ impl Simulation {
                 self.config.env.rewards.clone(),
                 &blue_ids,
                 allies,
-            );
+            )
+            .with_noise(
+                self.config.red.beh_noise,
+                Self::noise_seed(self.config.env.seed, id),
+            )
+            .with_missile_model(self.config.env.missile_model)
+            .with_aircraft_model(self.config.env.aircraft_model);
             self.red_agent_ids.push(format!("red_{i}"));
             self.fighters.push(f);
         }
+    }
+
+    /// Current kinematic state of every aircraft, as seen by missiles.
+    fn target_states(&self) -> HashMap<u32, TargetState> {
+        self.fighters
+            .iter()
+            .map(|f| {
+                (
+                    f.id,
+                    TargetState {
+                        pos: f.pos,
+                        vel: if f.alive {
+                            velocity_ms(f.hdg, f.pitch, f.speed)
+                        } else {
+                            [0.0; 3]
+                        },
+                        alive: f.alive,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Simulated time in seconds.
+    pub fn time_s(&self) -> f64 {
+        self.physics_step as f64 / self.config.env.phy_fps.max(1) as f64
+    }
+
+    fn emit(
+        &mut self,
+        kind: EventKind,
+        actor: u32,
+        target: Option<u32>,
+        missile: Option<u32>,
+        value: f64,
+        detail: &str,
+    ) {
+        let pole_nm = match (kind, target) {
+            (EventKind::Pitbull | EventKind::Hit | EventKind::Miss, Some(tid)) => {
+                let a = self.fighters.iter().find(|f| f.id == actor && f.alive);
+                let b = self.fighters.iter().find(|f| f.id == tid);
+                match (a, b) {
+                    (Some(a), Some(b)) => distance2d(a.pos, b.pos) * SConv::GDM2NM,
+                    _ => 0.0,
+                }
+            }
+            _ => 0.0,
+        };
+        self.events.push(SimEvent {
+            t: self.time_s(),
+            step: self.action_step,
+            kind,
+            actor,
+            target,
+            missile,
+            value,
+            detail: detail.to_string(),
+            pole_nm,
+        });
     }
 
     pub fn red_is_external(&self) -> bool {
@@ -319,6 +479,7 @@ impl Simulation {
         self.fire_range_n = 0;
         self.tracks_on_sum = 0.0;
         self.tracks_on_n = 0;
+        self.events.clear();
         self.spawn_teams();
         self.sense_and_observe(true)
     }
@@ -349,11 +510,96 @@ impl Simulation {
     }
 
     fn sense_all(&mut self) {
+        let before: Vec<(u32, Vec<(u32, bool)>)> = self
+            .fighters
+            .iter()
+            .map(|f| {
+                (
+                    f.id,
+                    f.enemy_tracks.iter().map(|t| (t.id, t.detected)).collect(),
+                )
+            })
+            .collect();
+        self.sense_all_inner();
+        self.update_missile_support();
+        let alive: HashMap<u32, bool> = self.fighters.iter().map(|f| (f.id, f.alive)).collect();
+        let mut evs = Vec::new();
+        for (f, (fid, prev)) in self.fighters.iter().zip(before.iter()) {
+            debug_assert_eq!(f.id, *fid);
+            if !f.alive {
+                continue;
+            }
+            for (t, (tid, was)) in f.enemy_tracks.iter().zip(prev.iter()) {
+                debug_assert_eq!(t.id, *tid);
+                if t.detected && !*was {
+                    evs.push((EventKind::TrackGained, f.id, t.id));
+                } else if !t.detected && *was && *alive.get(&t.id).unwrap_or(&false) {
+                    evs.push((EventKind::TrackLost, f.id, t.id));
+                }
+            }
+        }
+        for (k, a, t) in evs {
+            self.emit(k, a, Some(t), None, 0.0, "");
+        }
+    }
+
+    /// Datalink guidance follows the shooter's track (B-ACE 1.0): a missile keeps
+    /// support only while its shooter is alive, still owns it, and tracks the target
+    /// (own radar or shared datalink). Support is regained when the track returns.
+    fn update_missile_support(&mut self) {
+        if self.config.env.missile_support != crate::config::MissileSupport::Track {
+            return;
+        }
+        for m in self.missiles.iter_mut().filter(|m| m.alive && !m.pitbull) {
+            let supported = self.fighters.iter().any(|f| {
+                f.id == m.shooter_id
+                    && f.alive
+                    && f.in_flight_missile_id == Some(m.id)
+                    && f.enemy_tracks
+                        .iter()
+                        .any(|t| t.id == m.target_id && t.detected)
+            });
+            if supported {
+                m.recover_support();
+            } else {
+                m.lost_support();
+            }
+        }
+    }
+
+    /// Radar-warning cue: each aircraft learns the bearing of the closest enemy
+    /// missile whose seeker is active against it.
+    fn update_missile_warnings(&mut self) {
+        for f in self.fighters.iter_mut() {
+            f.missile_warning = self
+                .missiles
+                .iter()
+                .filter(|m| m.alive && m.pitbull && m.target_id == f.id && m.team != f.team)
+                .min_by(|a, b| {
+                    distance2d(a.pos, f.pos)
+                        .partial_cmp(&distance2d(b.pos, f.pos))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|m| heading_to(f.pos, m.pos));
+        }
+    }
+
+    fn sense_all_inner(&mut self) {
         let views = self.views();
         // First pass local detection without DL, then with DL from previous detections.
         // Approximate: compute local, build DL, update again.
-        let blue_ids: Vec<u32> = self.fighters.iter().filter(|f| f.team == 0).map(|f| f.id).collect();
-        let red_ids: Vec<u32> = self.fighters.iter().filter(|f| f.team == 1).map(|f| f.id).collect();
+        let blue_ids: Vec<u32> = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0)
+            .map(|f| f.id)
+            .collect();
+        let red_ids: Vec<u32> = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 1)
+            .map(|f| f.id)
+            .collect();
 
         for f in &mut self.fighters {
             let enemies: Vec<AircraftView> = views
@@ -388,7 +634,13 @@ impl Simulation {
         }
     }
 
-    fn try_fire(fighter: &mut Fighter, missiles: &mut Vec<Missile>, next_id: &mut u32) -> Option<f64> {
+    fn try_fire(
+        fighter: &mut Fighter,
+        missiles: &mut Vec<Missile>,
+        next_id: &mut u32,
+        model: crate::missile::MissileModel,
+        targets: &HashMap<u32, TargetState>,
+    ) -> Option<f64> {
         if !fighter.alive || !fighter.fire_cmd {
             return None;
         }
@@ -424,13 +676,21 @@ impl Simulation {
                 t.is_missile_support = false;
             }
         }
-        let m = Missile::launch(
+        let target = targets.get(&hpt).copied().unwrap_or(TargetState {
+            pos: fighter.pos,
+            vel: [0.0; 3],
+            alive: false,
+        });
+        let m = Missile::launch_model(
+            model,
             *next_id,
             fighter.id,
             hpt,
             fighter.team,
             fighter.pos,
             fighter.hdg,
+            velocity_ms(fighter.hdg, fighter.pitch, fighter.speed),
+            &target,
         );
         *next_id += 1;
         fighter.missiles -= 1;
@@ -455,24 +715,52 @@ impl Simulation {
             }
 
             // Missiles
-            let targets: HashMap<u32, ( [f64; 3], bool)> = self
-                .fighters
-                .iter()
-                .map(|f| (f.id, (f.pos, f.alive)))
-                .collect();
+            let targets = self.target_states();
 
             let mut hits: Vec<(u32, u32, u8)> = Vec::new(); // target_id, shooter_id, team
             let mut misses: Vec<u32> = Vec::new();
+            let mut mevents: Vec<(EventKind, u32, u32, u32, f64, String)> = Vec::new();
 
             for m in &mut self.missiles {
                 if !m.alive {
                     continue;
                 }
-                let (tpos, talive) = targets
-                    .get(&m.target_id)
-                    .copied()
-                    .unwrap_or(([0.0; 3], false));
-                let hit = m.tick(dt, Some(tpos), talive);
+                let tstate = targets.get(&m.target_id).copied().unwrap_or(TargetState {
+                    pos: [0.0; 3],
+                    vel: [0.0; 3],
+                    alive: false,
+                });
+                let was_pitbull = m.pitbull;
+                let hit = m.tick(dt, &tstate);
+                if m.pitbull && !was_pitbull {
+                    mevents.push((
+                        EventKind::Pitbull,
+                        m.shooter_id,
+                        m.target_id,
+                        m.id,
+                        m.time_alive,
+                        String::new(),
+                    ));
+                }
+                if hit {
+                    mevents.push((
+                        EventKind::Hit,
+                        m.shooter_id,
+                        m.target_id,
+                        m.id,
+                        m.time_alive,
+                        String::new(),
+                    ));
+                } else if !m.alive {
+                    mevents.push((
+                        EventKind::Miss,
+                        m.shooter_id,
+                        m.target_id,
+                        m.id,
+                        m.time_alive,
+                        m.miss_cause.clone().unwrap_or_default(),
+                    ));
+                }
                 if hit {
                     self.last_missile_tof = m.time_alive;
                     self.last_missile_pitbull = m.pitbull;
@@ -524,6 +812,10 @@ impl Simulation {
             }
 
             self.physics_step += 1;
+            // Missile events are stamped with the end time of the tick that produced them.
+            for (k, a, t, mid, v, d) in mevents {
+                self.emit(k, a, Some(t), Some(mid), v, &d);
+            }
             self.check_terminals();
         }
         self.action_step += 1;
@@ -570,8 +862,16 @@ impl Simulation {
         if self.end != EndCondition::Ongoing {
             return;
         }
-        let blue_alive = self.fighters.iter().filter(|f| f.team == 0 && f.alive).count();
-        let red_alive = self.fighters.iter().filter(|f| f.team == 1 && f.alive).count();
+        let blue_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 0 && f.alive)
+            .count();
+        let red_alive = self
+            .fighters
+            .iter()
+            .filter(|f| f.team == 1 && f.alive)
+            .count();
         let missiles_left = !self.missiles.is_empty();
 
         // Both sides dead is not a blue loss. K/D still come from alive counts.
@@ -588,8 +888,7 @@ impl Simulation {
         if blue_alive == 0 && !missiles_left {
             self.end = EndCondition::BlueKilled;
             for f in self.fighters.iter_mut().filter(|f| f.team == 0) {
-                f.rewards
-                    .add_terminal("Team_Killed", f.missiles);
+                f.rewards.add_terminal("Team_Killed", f.missiles);
                 f.done = true;
             }
             for f in self.fighters.iter_mut().filter(|f| f.team == 1) {
@@ -600,8 +899,7 @@ impl Simulation {
         if red_alive == 0 && !missiles_left {
             self.end = EndCondition::RedKilled;
             for f in self.fighters.iter_mut().filter(|f| f.team == 0) {
-                f.rewards
-                    .add_terminal("Enemies_Killed", f.missiles);
+                f.rewards.add_terminal("Enemies_Killed", f.missiles);
                 f.done = true;
             }
             for f in self.fighters.iter_mut().filter(|f| f.team == 1) {
@@ -624,8 +922,7 @@ impl Simulation {
             if self.end == EndCondition::RedMission {
                 for f in self.fighters.iter_mut() {
                     if f.team == 0 {
-                        f.rewards
-                            .add_terminal("Enemy_Achieved_Target", f.missiles);
+                        f.rewards.add_terminal("Enemy_Achieved_Target", f.missiles);
                     }
                     f.done = true;
                 }
@@ -688,7 +985,12 @@ impl Simulation {
                 .filter(|v| f.enemy_tracks.iter().any(|t| t.id == v.id))
                 .collect();
             let mut obs = f.build_obs(&allies);
+            // Enemy distance-to-goal is only observable for detected tracks;
+            // undetected enemies keep the neutral placeholder from `build_obs`.
             for e in &mut obs.enemies {
+                if e.detected < 0.5 {
+                    continue;
+                }
                 if let Some(ev) = enemies.iter().find(|x| x.id == e.id) {
                     e.dist_target = ev.dist2go / 3000.0;
                 }
@@ -734,6 +1036,7 @@ impl Simulation {
             agents,
             end: self.end,
             action_step: self.action_step,
+            events: std::mem::take(&mut self.events),
         }
     }
 
@@ -744,6 +1047,7 @@ impl Simulation {
         }
 
         self.sense_all();
+        self.update_missile_warnings();
 
         // Apply actions / behaviors
         let blue_ids = self.blue_agent_ids.clone();
@@ -775,9 +1079,15 @@ impl Simulation {
         // Firing (needs mutable fighters + missiles)
         let mut next_id = self.next_missile_id;
         let mut missiles = std::mem::take(&mut self.missiles);
+        let mut launches: Vec<(u32, u32, u32, f64)> = Vec::new();
+        let model = self.config.env.missile_model;
+        let targets = self.target_states();
         for f in &mut self.fighters {
             let before = f.missiles;
-            if let Some(rng_nm) = Self::try_fire(f, &mut missiles, &mut next_id) {
+            if let Some(rng_nm) = Self::try_fire(f, &mut missiles, &mut next_id, model, &targets) {
+                if let Some(m) = missiles.last() {
+                    launches.push((f.id, m.target_id, m.id, rng_nm));
+                }
                 if f.team == 0 {
                     self.fire_range_sum += rng_nm;
                     self.fire_range_n += 1;
@@ -789,6 +1099,20 @@ impl Simulation {
         }
         self.missiles = missiles;
         self.next_missile_id = next_id;
+        let track_mode = self.config.env.missile_support == crate::config::MissileSupport::Track;
+        for m in self.missiles.iter_mut() {
+            m.needs_support = track_mode;
+        }
+        for (shooter, target, mid, rng_nm) in launches {
+            self.emit(
+                EventKind::Launch,
+                shooter,
+                Some(target),
+                Some(mid),
+                rng_nm,
+                "",
+            );
+        }
 
         self.integrate_physics();
 
@@ -796,10 +1120,15 @@ impl Simulation {
         self.sense_all();
         self.mission_shape_learners();
         let agents = self.collect_learner_steps(true);
+        if self.end != EndCondition::Ongoing {
+            let detail = format!("{:?}", self.end);
+            self.emit(EventKind::End, 0, None, None, 0.0, &detail);
+        }
         StepResult {
             agents,
             end: self.end,
             action_step: self.action_step,
+            events: std::mem::take(&mut self.events),
         }
     }
 
@@ -807,6 +1136,7 @@ impl Simulation {
         SimSnapshot {
             action_step: self.action_step,
             end: self.end,
+            time_s: self.time_s(),
             fighters: {
                 let mut blue_i = 0usize;
                 let mut red_i = 0usize;
@@ -852,8 +1182,20 @@ impl Simulation {
                                     aspect: t.aspect,
                                     own_r_max: t.own_wez.r_max,
                                     is_missile_support: t.is_missile_support,
+                                    own_r_nez: t.own_wez.r_nez,
+                                    enemy_r_max: t.enemy_wez.r_max,
+                                    enemy_r_nez: t.enemy_wez.r_nez,
+                                    angle_off: t.angle_off,
+                                    offensive_factor: t.offensive_factor,
+                                    threat_factor: t.threat_factor,
                                 })
                                 .collect(),
+                            behavior: Some(f.behavior),
+                            mission: Some(f.mission),
+                            target_pos: Some(f.target_pos),
+                            hdg_cmd: f.hdg_cmd,
+                            g_cmd: f.g_cmd,
+                            reward: f.rewards.cumulative().clone(),
                         }
                     })
                     .collect()
@@ -869,6 +1211,10 @@ impl Simulation {
                     pitbull: m.pitbull,
                     target_id: m.target_id,
                     has_support: m.has_support,
+                    shooter_id: m.shooter_id,
+                    time_alive: m.time_alive,
+                    mach: m.mach,
+                    phase: m.phase().to_string(),
                 })
                 .collect(),
         }
@@ -1074,6 +1420,289 @@ mod tests {
         let s = sim.step(&acts);
         assert_eq!(s.agents.len(), 4);
         assert!(s.agents["red_0"].flat_obs.len() == sim.obs_size());
+    }
+
+    #[test]
+    fn undetected_enemy_does_not_leak_goal_distance() {
+        // Start far outside radar range so nothing is detected at reset.
+        let mut cfg = ScenarioConfig::default();
+        cfg.blue.init_position.z = 60.0;
+        cfg.blue.target_position.z = -60.0;
+        cfg.red.init_position.z = -60.0;
+        cfg.red.target_position.z = 60.0;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg);
+        let r = sim.reset(Some(1));
+        let e = &r.agents["agent_0"].obs.enemies[0];
+        assert_eq!(e.detected, 0.0);
+        assert_eq!(
+            e.dist_target, 0.5,
+            "undetected enemy must use the placeholder"
+        );
+        assert_eq!(e.aspect, 0.0);
+    }
+
+    #[test]
+    fn engagement_emits_launch_and_terminal_events() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 400;
+        cfg.blue.behavior = Behavior::Baseline1;
+        cfg.red.behavior = Behavior::Duck;
+        cfg.red.mission = crate::config::Mission::Striker;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(2));
+        let mut kinds = Vec::new();
+        let empty = HashMap::new();
+        let mut last_t = 0.0;
+        while sim.end == EndCondition::Ongoing {
+            for e in sim.step(&empty).events {
+                assert!(e.t >= last_t, "events must be time ordered");
+                last_t = e.t;
+                kinds.push(e.kind);
+            }
+        }
+        assert!(kinds.contains(&EventKind::TrackGained));
+        assert!(kinds.contains(&EventKind::Launch));
+        assert_eq!(kinds.last(), Some(&EventKind::End));
+        let launches = kinds.iter().filter(|k| **k == EventKind::Launch).count();
+        assert_eq!(launches as u32, sim.missiles_fired);
+    }
+
+    #[test]
+    fn snapshot_carries_reward_breakdown() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 20;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let mut acts = HashMap::new();
+        acts.insert("agent_0".to_string(), Action::default());
+        let mut total = 0.0;
+        for _ in 0..10 {
+            total += sim.step(&acts).agents["agent_0"].reward;
+        }
+        let snap = sim.snapshot();
+        let blue = snap.fighters.iter().find(|f| f.team == 0).unwrap();
+        assert!((blue.reward.total() - total).abs() < 1e-9);
+        assert!(snap.time_s > 0.0);
+    }
+
+    fn run_to_end(cfg: &ScenarioConfig, seed: u64) -> (u32, usize, usize) {
+        let mut sim = Simulation::new(cfg.clone());
+        sim.reset(Some(seed));
+        let empty = HashMap::new();
+        while sim.end == EndCondition::Ongoing {
+            sim.step(&empty);
+        }
+        let o = sim.outcome();
+        (o.steps, o.blue_kills, o.missiles_fired as usize)
+    }
+
+    #[test]
+    fn beh_noise_makes_seeds_matter_and_stays_reproducible() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 500;
+        cfg.blue.behavior = Behavior::Baseline1;
+        cfg.red.behavior = Behavior::Baseline1;
+        // Default: seeds do not change a scripted episode.
+        assert_eq!(run_to_end(&cfg, 1), run_to_end(&cfg, 2));
+        cfg.blue.beh_noise = 0.15;
+        cfg.red.beh_noise = 0.15;
+        cfg.blue.rnd_offset_range.x = 5.0;
+        cfg.red.rnd_offset_range.x = 5.0;
+        let runs: Vec<_> = (1..=6).map(|s| run_to_end(&cfg, s)).collect();
+        assert!(
+            runs.iter().any(|r| *r != runs[0]),
+            "noise should vary outcomes: {runs:?}"
+        );
+        assert_eq!(run_to_end(&cfg, 4), runs[3], "same seed must reproduce");
+    }
+
+    /// Median |aspect| to the highest-priority threat while in `state`.
+    fn median_aspect_in(state: FsmState, seeds: std::ops::Range<u64>) -> Option<f64> {
+        let mut xs = Vec::new();
+        for seed in seeds {
+            let mut cfg = ScenarioConfig::default();
+            cfg.env.max_cycles = 600;
+            cfg.blue.behavior = Behavior::Baseline1;
+            cfg.red.behavior = Behavior::Baseline1;
+            cfg.red.beh_config.d_shot = vec![0.62];
+            cfg.red.beh_config.l_crank = vec![0.58];
+            cfg.red.beh_config.l_break = vec![1.28];
+            for t in [&mut cfg.blue, &mut cfg.red] {
+                t.beh_noise = 0.1;
+                t.rnd_offset_range.x = 4.0;
+            }
+            let mut sim = Simulation::new(cfg);
+            sim.reset(Some(seed));
+            let empty = HashMap::new();
+            while sim.end == EndCondition::Ongoing {
+                sim.step(&empty);
+                for f in sim.fighters.iter().filter(|f| f.alive && f.fsm == state) {
+                    if let Some(t) = f
+                        .enemy_tracks
+                        .iter()
+                        .find(|t| Some(t.id) == f.hpt_id && t.detected)
+                    {
+                        xs.push(t.aspect.abs());
+                    }
+                }
+            }
+        }
+        if xs.is_empty() {
+            return None;
+        }
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        Some(xs[xs.len() / 2])
+    }
+
+    #[test]
+    fn fsm_support_holds_an_offset_instead_of_zigzagging() {
+        // Regression: the side used to flip with the sign of the aspect every
+        // decision, pinning the target on the nose (median |aspect| ~3 deg).
+        let m = median_aspect_in(FsmState::MissileSupport, 1..7).expect("support observed");
+        assert!(
+            m > 25.0,
+            "support should offset the target, median |aspect| = {m:.1}"
+        );
+    }
+
+    #[test]
+    fn fsm_evade_turns_away_from_the_threat() {
+        // Regression: evade used to keep the threat within ~6 deg of the nose.
+        // Turning away drops the track past the 60 deg radar gimbal, so only the
+        // first part of the turn is observable here.
+        if let Some(m) = median_aspect_in(FsmState::Evade, 1..7) {
+            assert!(m > 30.0, "evade should turn away, median |aspect| = {m:.1}");
+        }
+    }
+
+    #[test]
+    fn legacy_missile_without_support_cannot_go_active() {
+        // FireOnce launches at ~25 NM, then we kill the shooter: the missile must
+        // lose datalink support and never pitbull.
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 200;
+        cfg.env.stop_mission = false;
+        cfg.env.missile_support = crate::config::MissileSupport::Track;
+        cfg.env.missile_model = crate::missile::MissileModel::Legacy;
+        cfg.blue.behavior = Behavior::FireOnce;
+        cfg.blue.init_position.z = 12.5;
+        cfg.blue.target_position.z = -12.5;
+        cfg.red.behavior = Behavior::Duck;
+        cfg.red.init_position.z = -12.5;
+        cfg.red.init_hdg = 0.0;
+        cfg.red.target_position.z = -80.0;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        while sim.missiles_fired == 0 && sim.end == EndCondition::Ongoing {
+            sim.step(&empty);
+        }
+        assert_eq!(sim.missiles_fired, 1);
+        sim.fighters.iter_mut().find(|f| f.team == 0).unwrap().alive = false;
+        let mut kinds = Vec::new();
+        for _ in 0..140 {
+            let r = sim.step(&empty);
+            assert!(
+                sim.missiles.iter().all(|m| !m.has_support),
+                "dead shooter cannot support"
+            );
+            kinds.extend(r.events.iter().map(|e| (e.kind, e.detail.clone())));
+            if sim.missiles.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            !kinds.iter().any(|(k, _)| *k == EventKind::Pitbull),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|(k, d)| *k == EventKind::Miss && d == "lost_support"),
+            "{kinds:?}"
+        );
+    }
+
+    #[test]
+    fn hard_turns_bleed_speed_and_it_recovers() {
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 200;
+        cfg.red.behavior = Behavior::Duck;
+        let mut sim = Simulation::new(cfg.clone());
+        sim.reset(Some(1));
+        let top = sim.fighters[0].top_speed();
+        assert!((sim.fighters[0].speed - top).abs() < 1e-9);
+        let turn = Action {
+            d_heading: 0.5,
+            d_altitude: 0.0,
+            g_force: 1.0,
+            fire: -1.0,
+        };
+        let mut acts = HashMap::new();
+        for _ in 0..10 {
+            acts.insert("agent_0".to_string(), turn);
+            sim.step(&acts);
+        }
+        let slowed = sim.fighters[0].speed;
+        assert!(
+            slowed < 0.85 * top,
+            "10 s at max g should bleed speed: {slowed} vs {top}"
+        );
+        for _ in 0..60 {
+            acts.insert(
+                "agent_0".to_string(),
+                Action {
+                    d_heading: 0.0,
+                    ..turn
+                },
+            );
+            sim.step(&acts);
+        }
+        assert!(
+            sim.fighters[0].speed > 0.95 * top,
+            "straight flight recovers speed"
+        );
+        // The legacy constant-speed model ignores manoeuvres.
+        cfg.env.aircraft_model = crate::config::AircraftModel::ConstantSpeed;
+        let mut legacy = Simulation::new(cfg);
+        legacy.reset(Some(1));
+        for _ in 0..10 {
+            acts.insert("agent_0".to_string(), turn);
+            legacy.step(&acts);
+        }
+        assert!((legacy.fighters[0].speed - legacy.fighters[0].top_speed()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scripted_pilot_defends_against_an_active_missile() {
+        // Red (balanced-like FSM) is shot at from inside 10 NM; once the missile is
+        // active it must turn cold, regardless of its offensive state.
+        let mut cfg = ScenarioConfig::default();
+        cfg.env.max_cycles = 60;
+        cfg.blue.behavior = Behavior::FireOnce;
+        cfg.blue.init_position.z = 4.0;
+        cfg.red.behavior = Behavior::Baseline1;
+        cfg.red.beh_config.l_break = vec![2.5]; // never breaks on geometry alone
+        cfg.red.init_position.z = -4.0;
+        let mut sim = Simulation::new(cfg);
+        sim.reset(Some(1));
+        let empty = HashMap::new();
+        let mut defended = false;
+        for _ in 0..30 {
+            sim.step(&empty);
+            let red = sim.fighters.iter().find(|f| f.team == 1).unwrap();
+            if let Some(brg) = red.missile_warning {
+                assert_eq!(red.fsm, FsmState::Evade);
+                assert!((crate::geometry::clamp_hdg(red.hdg_cmd - brg).abs() - 180.0).abs() < 1.0);
+                defended = true;
+                break;
+            }
+            if sim.end != EndCondition::Ongoing {
+                break;
+            }
+        }
+        assert!(defended, "red should get a missile warning and defend");
     }
 
     #[test]

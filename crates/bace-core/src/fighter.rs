@@ -8,6 +8,8 @@ use crate::obs::{Action, AllyObs, EnemyObs, OwnObs, StructuredObs};
 use crate::rewards::Rewards;
 use crate::units::SConv;
 use crate::wez::{self, WezRanges};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -104,6 +106,20 @@ pub struct Fighter {
     pub min_level: f64,
     pub enemy_tracks: Vec<Track>,
     pub ally_ids: Vec<u32>,
+    /// Relative FSM threshold jitter (see `TeamConfig::beh_noise`).
+    pub beh_noise: f64,
+    /// Side (+1 right / -1 left) chosen when an engagement starts and kept for
+    /// cranks and missile support, as in B-ACE 1.0.
+    pub defense_side: f64,
+    /// Decisions left in a committed break (hysteresis against Engage/Evade dithering).
+    pub evade_hold: u32,
+    /// Missile physics carried by this aircraft (drives its WEZ estimates).
+    pub missile_model: crate::missile::MissileModel,
+    pub aircraft_model: crate::config::AircraftModel,
+    /// Bearing (deg) of the nearest active enemy missile tracking this aircraft,
+    /// as a radar warning receiver would report it. `None` when no warning.
+    pub missile_warning: Option<f64>,
+    rng: StdRng,
 }
 
 impl Fighter {
@@ -128,7 +144,7 @@ impl Fighter {
             pos,
             hdg: clamp_hdg(hdg),
             pitch: 0.0,
-            speed: 650.0 * SConv::KNOT2GDM_S,
+            speed: 650.0 * SConv::KNOT2GDM_S * Self::altitude_speed_factor(pos[1]),
             alive: true,
             missiles: 6,
             behavior,
@@ -157,14 +173,50 @@ impl Fighter {
             min_level: 1000.0 * SConv::FT2GDM,
             enemy_tracks: enemy_ids.iter().map(|&eid| Track::blank(eid)).collect(),
             ally_ids,
+            beh_noise: 0.0,
+            defense_side: 0.0,
+            evade_hold: 0,
+            missile_model: crate::missile::MissileModel::default(),
+            aircraft_model: crate::config::AircraftModel::default(),
+            missile_warning: None,
+            rng: StdRng::seed_from_u64(id as u64),
         }
     }
 
-    fn altitude_speed_factor(alt: f64) -> f64 {
+    pub fn with_missile_model(mut self, model: crate::missile::MissileModel) -> Self {
+        self.missile_model = model;
+        self
+    }
+
+    pub fn with_aircraft_model(mut self, model: crate::config::AircraftModel) -> Self {
+        self.aircraft_model = model;
+        self
+    }
+
+    /// Top speed at the current altitude, GDM/s.
+    pub fn top_speed(&self) -> f64 {
+        self.max_speed * Self::altitude_speed_factor(self.pos[1])
+    }
+
+    /// Enable stochastic FSM decisions with a per-aircraft stream.
+    pub fn with_noise(mut self, beh_noise: f64, seed: u64) -> Self {
+        self.beh_noise = beh_noise.max(0.0);
+        self.rng = StdRng::seed_from_u64(seed);
+        self
+    }
+
+    fn jitter(&mut self, v: f64) -> f64 {
+        if self.beh_noise <= 0.0 {
+            return v;
+        }
+        v * (1.0 + self.rng.gen_range(-self.beh_noise..=self.beh_noise))
+    }
+
+    pub fn altitude_speed_factor(alt: f64) -> f64 {
         0.2 * alt / 76.2 + 0.8
     }
 
-    fn altitude_g_factor(alt: f64) -> f64 {
+    pub fn altitude_g_factor(alt: f64) -> f64 {
         (-0.5 * alt / 76.2 + 1.5).max(0.3)
     }
 
@@ -244,10 +296,26 @@ impl Fighter {
                 track.angle_off = angle_off(own_hdg, enemy.hdg);
                 track.dist = dist;
                 track.alt_diff = (own_pos[1] - enemy.pos[1]) / 150.0;
-                track.own_wez = wez::evaluate(own_pos[1], track.aspect, track.angle_off);
+                // Enemy's nose relative to its line of sight to us (0 = hot).
                 let inv_asp = aspect_angle(enemy.hdg, heading_to(enemy.pos, own_pos));
                 let inv_off = angle_off(enemy.hdg, own_hdg);
-                track.enemy_wez = wez::evaluate(enemy.pos[1], inv_asp, inv_off);
+                let model = self.missile_model;
+                track.own_wez = wez::evaluate_model(
+                    model,
+                    own_pos[1],
+                    enemy.pos[1],
+                    track.aspect,
+                    inv_asp,
+                    track.angle_off,
+                );
+                track.enemy_wez = wez::evaluate_model(
+                    model,
+                    enemy.pos[1],
+                    own_pos[1],
+                    inv_asp,
+                    track.aspect,
+                    inv_off,
+                );
                 track.offensive_factor =
                     wez::offensive_factor(dist, track.own_wez.r_max, track.own_wez.r_nez);
                 track.threat_factor =
@@ -332,28 +400,97 @@ impl Fighter {
         let d_shot = self.beh.d_shot.first().copied().unwrap_or(0.85);
         let l_crank = self.beh.l_crank.first().copied().unwrap_or(0.6);
         let l_break = self.beh.l_break.first().copied().unwrap_or(0.95);
+        let (d_shot, l_crank, l_break) = (
+            self.jitter(d_shot),
+            self.jitter(l_crank),
+            self.jitter(l_break),
+        );
 
         let hpt = self
             .hpt_id
             .and_then(|id| self.enemy_tracks.iter().find(|t| t.id == id && t.detected))
             .cloned();
 
+        // Latch a defensive side at the start of an engagement (random when
+        // `beh_noise > 0`, otherwise from the current geometry) so cranks and
+        // support offsets hold one side instead of flipping every decision.
+        if hpt.is_some() && self.defense_side == 0.0 {
+            self.defense_side = if self.beh_noise > 0.0 {
+                if self.rng.gen_bool(0.5) {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else if hpt.as_ref().map(|t| t.aspect).unwrap_or(0.0) >= 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+        }
+        if hpt.is_none() && !self.supporting_missile {
+            self.defense_side = 0.0;
+        }
+        let side = if self.defense_side == 0.0 {
+            1.0
+        } else {
+            self.defense_side
+        };
+
+        // Minimum time a break is held before re-engaging (decisions).
+        const EVADE_HOLD: u32 = 8;
+        // Missile warning: an active missile is tracking us. Defend by turning
+        // cold (missile on the tail) at the break g; this overrides support.
+        if let Some(brg) = self.missile_warning {
+            self.fsm = FsmState::Evade;
+            self.evade_hold = EVADE_HOLD;
+            self.hdg_cmd = clamp_hdg(brg + 180.0);
+            self.g_cmd = self.max_g * 0.8;
+            self.fire_cmd = false;
+            return;
+        }
+        // Start the turn-in this far outside the shot range (fraction of d_shot).
+        const COMMIT_MARGIN: f64 = 1.15;
         if let Some(ref t) = hpt {
-            if t.threat_factor >= l_break {
+            let bearing = clamp_hdg(self.hdg + t.aspect);
+            let range_ratio = t.dist / t.own_wez.r_max.max(1e-6);
+            // Commit: from just outside shot range, turn in and accept the risk
+            // until the missile is off. A valid shot is taken before any break
+            // (B-ACE 1.0 checks the launch before the break).
+            let committed = !self.supporting_missile
+                && self.evade_hold == 0
+                && self.missiles > 0
+                && range_ratio <= d_shot * COMMIT_MARGIN
+                && t.aspect.abs() < 45.0;
+            let can_shoot_now = committed && range_ratio <= d_shot && t.aspect.abs() < 30.0;
+            // Supporting a missile tolerates more threat (B-ACE 1.0: +0.5).
+            let break_at = l_break + if self.supporting_missile { 0.5 } else { 0.0 };
+            let in_break = self.evade_hold > 0 && t.threat_factor >= 0.8 * l_break;
+            if !committed && !can_shoot_now && (t.threat_factor >= break_at || in_break) {
+                // Break: turn away from the threat (B-ACE 1.0: radial + 180) and hold it.
+                if self.fsm != FsmState::Evade {
+                    self.evade_hold = EVADE_HOLD;
+                }
+                self.evade_hold = self.evade_hold.saturating_sub(1).max(1);
                 self.fsm = FsmState::Evade;
-                let side = if t.aspect >= 0.0 { 1.0 } else { -1.0 };
-                self.hdg_cmd = clamp_hdg(self.hdg + 90.0 * side);
+                self.hdg_cmd = clamp_hdg(bearing + 180.0);
                 self.g_cmd = self.max_g * 0.8;
                 self.fire_cmd = false;
                 return;
             }
         }
+        self.evade_hold = self.evade_hold.saturating_sub(1);
+        if self.fsm == FsmState::Evade && self.evade_hold > 0 {
+            // Threat dropped or track lost while still in the hold: keep running.
+            self.g_cmd = self.max_g * 0.8;
+            self.fire_cmd = false;
+            return;
+        }
 
         if self.supporting_missile {
+            // Offset to keep the target inside the radar while the missile flies.
             self.fsm = FsmState::MissileSupport;
             if let Some(ref t) = hpt {
                 let bearing = clamp_hdg(self.hdg + t.aspect);
-                let side = if t.aspect >= 0.0 { 1.0 } else { -1.0 };
                 self.hdg_cmd = clamp_hdg(bearing + 50.0 * side);
                 self.g_cmd = 3.0;
             }
@@ -364,15 +501,20 @@ impl Fighter {
         if let Some(ref t) = hpt {
             self.fsm = FsmState::Engage;
             let bearing = clamp_hdg(self.hdg + t.aspect);
-            if t.offensive_factor <= l_crank {
-                let side = if t.aspect >= 0.0 { 1.0 } else { -1.0 };
+            let range_ratio = t.dist / t.own_wez.r_max.max(1e-6);
+            let shot_valid = range_ratio <= d_shot && self.missiles > 0;
+            if range_ratio <= d_shot * COMMIT_MARGIN && self.missiles > 0 {
+                // Commit: turn in to put the target inside the launch cone.
+                self.hdg_cmd = bearing;
+            } else if t.threat_factor > l_crank {
+                // Crank once threatened (B-ACE 1.0: threat_factor > lCrank): hold the
+                // target 40 deg off the nose on the latched side to slow the closure.
                 self.hdg_cmd = clamp_hdg(bearing + 40.0 * side);
             } else {
                 self.hdg_cmd = bearing;
             }
             self.g_cmd = 4.0;
-            let range_ratio = t.dist / t.own_wez.r_max.max(1e-6);
-            self.fire_cmd = range_ratio <= d_shot && t.aspect.abs() < 30.0 && self.missiles > 0;
+            self.fire_cmd = shot_valid && t.aspect.abs() < 30.0;
             return;
         }
 
@@ -401,7 +543,23 @@ impl Fighter {
         let desired_pitch = level_diff.clamp(-15.0, 35.0);
         self.pitch += (desired_pitch - self.pitch).clamp(-0.5, 0.5);
 
-        self.speed = self.max_speed * Self::altitude_speed_factor(self.pos[1]);
+        let v_top = self.top_speed();
+        match self.aircraft_model {
+            crate::config::AircraftModel::ConstantSpeed => self.speed = v_top,
+            crate::config::AircraftModel::Energy => {
+                // Point-mass energy balance: thrust excess recovers speed toward the
+                // altitude's maximum; induced drag grows with load factor (n² for the
+                // turn component); climbing trades speed for height.
+                const RECOVER_TAU_S: f64 = 25.0;
+                const BLEED_PER_G2: f64 = 0.19 * SConv::REAL2GD; // m/s² per g² -> GDM/s²
+                let omega = (step / dt.max(1e-9)).to_radians().abs();
+                let n_turn = omega * self.speed / SConv::GRAVITY_GDM;
+                let accel = (v_top - self.speed) / RECOVER_TAU_S
+                    - BLEED_PER_G2 * n_turn * n_turn
+                    - SConv::GRAVITY_GDM * self.pitch.to_radians().sin();
+                self.speed = (self.speed + accel * dt).clamp(0.45 * v_top, 1.05 * v_top);
+            }
+        }
         let rad = self.hdg.to_radians();
         self.pos[0] += rad.sin() * self.speed * dt;
         self.pos[1] = (self.pos[1] + self.pitch.to_radians().sin() * self.speed * dt)
@@ -455,7 +613,7 @@ impl Fighter {
                     EnemyObs {
                         id: t.id,
                         alt_diff: 0.0,
-                        aspect: aspect_angle(self.hdg, 0.0) / 180.0,
+                        aspect: 0.0,
                         angle_off: 0.0,
                         dist: -1.0,
                         dist_target: 0.5,
@@ -493,7 +651,7 @@ impl Fighter {
                         AllyObs {
                             id: *aid,
                             alt_diff: 0.0,
-                            aspect: aspect_angle(self.hdg, 0.0) / 180.0,
+                            aspect: 0.0,
                             angle_off: 0.0,
                             dist: -1.0,
                             dist_target: 0.5,

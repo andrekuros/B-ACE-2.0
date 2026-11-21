@@ -12,6 +12,9 @@ use std::collections::HashMap;
 struct NativeEnv {
     sim: Simulation,
     discrete: bool,
+    /// When set, the last step is kept so `frame_json` can describe it (recording).
+    keep_frames: bool,
+    last: Option<bace_core::StepResult>,
 }
 
 fn parse_action(v: &Bound<'_, PyAny>, discrete: bool) -> PyResult<Action> {
@@ -45,13 +48,44 @@ impl NativeEnv {
         Ok(Self {
             sim: Simulation::new(cfg),
             discrete,
+            keep_frames: false,
+            last: None,
         })
     }
 
     #[pyo3(signature = (seed=None))]
     fn reset(&mut self, seed: Option<u64>) -> PyResult<PyObject> {
         let result = self.sim.reset(seed);
-        Python::with_gil(|py| step_to_py(py, &result))
+        let out = Python::with_gil(|py| step_to_py(py, &result));
+        if self.keep_frames {
+            self.last = Some(result);
+        }
+        out
+    }
+
+    /// Keep the last step so `frame_json()` can return it (used by `bace.record`).
+    fn set_keep_frames(&mut self, on: bool) {
+        self.keep_frames = on;
+        if !on {
+            self.last = None;
+        }
+    }
+
+    /// The last reset/step as a Lab frame: snapshot, structured obs, rewards, events.
+    fn frame_json(&self) -> PyResult<String> {
+        let Some(r) = &self.last else {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "no frame kept: call set_keep_frames(True) before reset()",
+            ));
+        };
+        serde_json::to_string(&serde_json::json!({
+            "snapshot": self.sim.snapshot(),
+            "agents": r.agents,
+            "events": r.events,
+            "end": r.end,
+            "action_step": r.action_step,
+        }))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     fn step(&mut self, actions: Bound<'_, PyDict>) -> PyResult<PyObject> {
@@ -61,7 +95,11 @@ impl NativeEnv {
             map.insert(name, parse_action(&v, self.discrete)?);
         }
         let result = self.sim.step(&map);
-        Python::with_gil(|py| step_to_py(py, &result))
+        let out = Python::with_gil(|py| step_to_py(py, &result));
+        if self.keep_frames {
+            self.last = Some(result);
+        }
+        out
     }
 
     fn obs_size(&self) -> usize {
@@ -181,7 +219,10 @@ impl NativeVecEnv {
         if self.auto_reset {
             for (i, r) in results.iter().enumerate() {
                 if r.end != bace_core::EndCondition::Ongoing {
-                    let seed = Some(1u64.wrapping_add(i as u64).wrapping_add(r.action_step as u64));
+                    let seed = Some(
+                        1u64.wrapping_add(i as u64)
+                            .wrapping_add(r.action_step as u64),
+                    );
                     let _ = self.envs.envs[i].reset(seed);
                 }
             }
@@ -230,9 +271,14 @@ fn step_to_py(py: Python<'_>, result: &bace_core::StepResult) -> PyResult<PyObje
 #[pyfunction]
 #[pyo3(signature = (configs_json, max_parallel=8))]
 fn run_experiment(configs_json: &str, max_parallel: usize) -> PyResult<String> {
-    let configs: Vec<ScenarioConfig> = serde_json::from_str(configs_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("configs json: {e}"))
-    })?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(configs_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("configs json: {e}")))?;
+    // Merge each case over the defaults (a bare `red` block must keep red's spawn).
+    let configs = raw
+        .iter()
+        .map(ScenarioConfig::from_partial_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("configs json: {e}")))?;
     let results = bace_vec::run_experiment(configs, max_parallel.max(1));
     serde_json::to_string(&results)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))

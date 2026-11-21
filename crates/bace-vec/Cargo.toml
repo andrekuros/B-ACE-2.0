@@ -5,11 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Batched parallel B-ACE environments"
 
+[features]
+default = ["native"]
+# Threaded vector envs, episode recording and wall-clock benchmarks.
+# Disable for WebAssembly builds: recipes then run sequentially.
+native = ["dep:rayon", "dep:bace-record"]
+
 [dependencies]
 bace-core = { path = "../bace-core" }
-bace-record = { path = "../bace-record" }
+bace-record = { path = "../bace-record", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rayon = { workspace = true }
-uuid = { workspace = true }
-rand = { workspace = true }
+rayon = { workspace = true, optional = true }
+rand = { version = "0.8", default-features = false, features = ["std_rng"] }

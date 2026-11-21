@@ -15,6 +15,10 @@ impl SConv {
     pub const FT2M: f64 = 0.3048;
     pub const FT2GDM: f64 = 0.3048 / Self::SCALE_FACTOR;
     pub const GRAVITY_GDM: f64 = 9.81 * Self::REAL2GD;
+    /// Metres per GDM.
+    pub const GDM2M: f64 = Self::SCALE_FACTOR;
+    pub const M2NM: f64 = 1.0 / 1852.0;
+    pub const G0: f64 = 9.806_65;
 }
 
 #[cfg(test)]
