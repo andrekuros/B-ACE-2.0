@@ -29,8 +29,9 @@ Mach number and manoeuvre limits.
 
 - Perfect detection inside 50 NM horizontal range, ±60° azimuth, +40/−20° elevation.
 - `share_tracks`: a team pools detections (an enemy seen by any ally is a track for all).
-- Missile warning: an aircraft knows the bearing of an enemy missile whose seeker is active
-  against it (what a radar warning receiver reports). Scripted pilots defend on it.
+- Missile warning (`env.missile_warning`, default on): an aircraft knows the bearing of an
+  enemy missile whose seeker is active against it (what a radar warning receiver reports).
+  Scripted pilots defend on it.
 
 ## Missiles (`env.missile_model`)
 
@@ -106,6 +107,13 @@ Pilot sets:
   the flyout-derived WEZ they shoot just outside Rmax and break early, so they are very
   passive.
 - `duck` flies straight to its target; `fire_once` launches one missile at the first track.
+
+## Shot log
+
+`outcome()["shots"]` lists every missile of both teams: launch time and range, the shooter's
+`Rmax`/`Rnez` against the target at launch, shooter and target altitude, target aspect,
+shooter speed, A-pole, F-pole, time of flight and result (`hit`, a miss cause, or
+`in_flight` if the episode ended first).
 
 ## Observations, actions, rewards
 

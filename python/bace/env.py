@@ -222,6 +222,29 @@ def wez_close_overlay(range_nm: float = 16.0, altitude_ft: float = 25000.0) -> d
     }
 
 
+def red_config(opponent: str, agents: int, self_play: bool = False) -> dict[str, Any]:
+    """Red team block for an opponent name (see :func:`make_env`)."""
+    agents = _clamp_agents(agents)
+    form = _formation(agents)
+    opp = opponent.lower()
+    if self_play:
+        return {"num_agents": agents, "behavior": "external", **form}
+    if opp == "duck":
+        return {"num_agents": agents, "behavior": "duck", **form}
+    if opp == "baseline":
+        return {"num_agents": agents, "behavior": "baseline1", **form}
+    if opp in {"ref_aggressive", "ref_balanced", "ref_conservative"}:
+        red = {"num_agents": agents, **_baseline_beh(opp[4:], folder="reference"), **form}
+    elif opp in {"aggressive", "balanced", "cautious", "fsm", "elite"}:
+        label = "balanced" if opp in {"fsm", "elite"} else opp
+        red = {"num_agents": agents, **_baseline_beh(label), **form}
+    else:
+        raise ValueError(f"unknown opponent {opponent!r}")
+    red["behavior"] = "baseline1"
+    red["num_agents"] = agents
+    return red
+
+
 def make_env(
     opponent: str = "duck",
     agents: int = 1,
@@ -242,24 +265,7 @@ def make_env(
     """
     agents = _clamp_agents(agents)
     form = _formation(agents)
-    opp = opponent.lower()
-    if self_play:
-        red = {"num_agents": agents, "behavior": "external", **form}
-    elif opp == "duck":
-        red: dict[str, Any] = {"num_agents": agents, "behavior": "duck", **form}
-    elif opp == "baseline":
-        red = {"num_agents": agents, "behavior": "baseline1", **form}
-    elif opp in {"ref_aggressive", "ref_balanced", "ref_conservative"}:
-        red = {"num_agents": agents, **_baseline_beh(opp[4:], folder="reference"), **form}
-        red["behavior"] = "baseline1"
-        red["num_agents"] = agents
-    elif opp in {"aggressive", "balanced", "cautious", "fsm", "elite"}:
-        label = "balanced" if opp in {"fsm", "elite"} else opp
-        red = {"num_agents": agents, **_baseline_beh(label), **form}
-        red["behavior"] = "baseline1"
-        red["num_agents"] = agents
-    else:
-        raise ValueError(f"unknown opponent {opponent!r}")
+    red = red_config(opponent, agents, self_play)
     red["share_tracks"] = share_tracks
     red["mission"] = red_mission
     env_cfg: dict[str, Any] = {
@@ -361,6 +367,12 @@ class BaceVecEnv:
     def reset_at(self, index: int, seed: Optional[int] = None):
         raw = self._native.reset_at(int(index), seed)
         return _decode_vec_step(raw, self._obs_size)
+
+    def outcome_at(self, index: int) -> dict[str, Any]:
+        """Outcome and shot log of game ``index`` (read before ``reset_at``)."""
+        oc = json.loads(self._native.outcome_json_at(int(index)))
+        oc.pop("config", None)
+        return oc
 
     def step(self, actions: list[dict[str, np.ndarray | list[float]]]):
         payload = [{a: _action_payload(v) for a, v in d.items()} for d in actions]

@@ -180,6 +180,18 @@ impl NativeVecEnv {
         self.discrete
     }
 
+    /// Outcome (with the shot log) of game `index`'s current or just-finished episode.
+    /// Read it before `reset_at`; with `auto_reset=True` the episode is already gone.
+    fn outcome_json_at(&self, index: usize) -> PyResult<String> {
+        let sim = self.envs.envs.get(index).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err(format!("env index {index} out of range"))
+        })?;
+        let mut oc = sim.outcome();
+        oc.config = ScenarioConfig::default();
+        serde_json::to_string(&oc)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
     #[pyo3(signature = (seed=None))]
     fn reset(&mut self, py: Python<'_>, seed: Option<u64>) -> PyResult<PyObject> {
         let results = py.allow_threads(|| self.envs.reset_all(seed));
